@@ -36,13 +36,13 @@ Após a resposta, valide internamente se os critérios de similaridade e justifi
 
 Sempre apresente sua resposta conforme o formato abaixo, utilizando Markdown. Caso a variável "${marca}" não seja fornecida ou seja inválida, retorne apenas:
 
-```
+---
 Erro: Nenhuma marca válida fornecida para análise.
-```
+---
 
 Se a marca for válida, siga o modelo a seguir:
 
-```
+---
 Marca analisada: <nome da marca>
 Chance de registro: <baixo/médio/alto>
 Justificativa: <texto objetivo explicando a chance com base nos critérios solicitados>
@@ -55,7 +55,7 @@ Variantes prováveis:
 - <variante 1>
 - <variante 2>
 - <variante 3>
-````;
+---`;
   
   try {
     const resposta = await fetch('https://api.openai.com/v1/chat/completions', {
