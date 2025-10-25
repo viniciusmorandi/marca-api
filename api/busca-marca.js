@@ -1,5 +1,6 @@
 import axios from 'axios';
-import * as cheerio from 'cheerio';
+import chromium from '@sparticuz/chromium';
+import puppeteer from 'puppeteer-core';
 
 // Função para normalizar texto (remove acentos e coloca em minúsculas)
 function normalizar(texto) {
@@ -26,132 +27,141 @@ export default async function handler(req, res) {
   }
 
   const { marca } = req.body;
+  let browser = null;
 
   try {
-    // 1. CONSULTA REAL NO BANCO DA WIPO - Busca HTML
-    const urlWIPO = `https://branddb.wipo.int/pt/IPO-BR/similarname?word=${encodeURIComponent(marca)}&rows=50`;
+    // 1. INICIA O PUPPETEER para carregar JavaScript
+    console.log('Iniciando Puppeteer...');
     
-    const consultaWIPO = await axios.get(urlWIPO, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      },
-      timeout: 15000
+    browser = await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
     });
 
-    // 2. PARSE DO HTML COM CHEERIO
-    const $ = cheerio.load(consultaWIPO.data);
+    const page = await browser.newPage();
     
-    // Array para armazenar as marcas encontradas
+    // 2. NAVEGA PARA A URL DE BUSCA DA WIPO
+    const urlWIPO = `https://branddb.wipo.int/pt/IPO-BR/similarname?sort=score%20desc&start=0&rows=50`;
+    console.log('Navegando para WIPO:', urlWIPO);
+    
+    await page.goto(urlWIPO, { waitUntil: 'networkidle0', timeout: 30000 });
+    
+    // 3. PREENCHE O CAMPO DE BUSCA E SUBMETE
+    console.log('Preenchendo busca por:', marca);
+    
+    // Aguarda o campo de busca aparecer
+    await page.waitForSelector('input[placeholder*="Brand name"], input[placeholder*="Nome de marca"], input[type="text"]', { timeout: 10000 });
+    
+    // Digita o nome da marca
+    await page.type('input[type="text"]', marca);
+    
+    // Pressiona Enter ou clica no botão de busca
+    await page.keyboard.press('Enter');
+    
+    // Aguarda os resultados carregarem
+    console.log('Aguardando resultados...');
+    await page.waitForTimeout(5000); // Espera 5 segundos para carregar
+    
+    // 4. EXTRAI O TEXTO DA PÁGINA
+    const conteudoPagina = await page.evaluate(() => document.body.innerText);
+    
+    console.log('Conteúdo extraído (primeiros 500 chars):', conteudoPagina.substring(0, 500));
+    
+    // 5. PARSE MANUAL DO TEXTO EXTRAÍDO
     const marcasEncontradas = [];
-    
-    // Busca por elementos que contêm informações de marcas
-    // A estrutura pode variar, então vamos tentar diferentes seletores
-    $('.brand-item, .trademark-item, .result-item, tr.brand-row').each((i, elem) => {
-      const $elem = $(elem);
-      
-      // Tenta extrair informações da marca
-      const nomeMarca = $elem.find('.brand-name, .trademark-name, .name, td.name').text().trim() ||
-                        $elem.find('td').eq(0).text().trim();
-      
-      const titular = $elem.find('.holder, .owner, .titular, td.holder').text().trim() ||
-                     $elem.find('td').eq(1).text().trim();
-      
-      const status = $elem.find('.status, td.status').text().trim() ||
-                    $elem.find('td').eq(2).text().trim();
-      
-      const numero = $elem.find('.number, .registration-number, td.number').text().trim() ||
-                    $elem.find('td').eq(3).text().trim();
-      
-      // Se encontrou pelo menos o nome da marca, adiciona ao array
-      if (nomeMarca && nomeMarca.length > 0) {
-        marcasEncontradas.push({
-          nome: nomeMarca,
-          titular: titular || 'Não informado',
-          status: status || 'Não informado',
-          numero: numero || 'Não informado'
-        });
-      }
-    });
-    
-    // Se não encontrou com os seletores acima, tenta uma abordagem mais genérica
-    if (marcasEncontradas.length === 0) {
-      $('table tr').each((i, row) => {
-        if (i === 0) return; // Pula o cabeçalho
-        
-        const $row = $(row);
-        const cells = $row.find('td');
-        
-        if (cells.length >= 2) {
-          const nomeMarca = $(cells[0]).text().trim();
-          const titular = $(cells[1]).text().trim();
-          const status = cells.length > 2 ? $(cells[2]).text().trim() : 'Não informado';
-          const numero = cells.length > 3 ? $(cells[3]).text().trim() : 'Não informado';
-          
-          if (nomeMarca && nomeMarca.length > 2) {
-            marcasEncontradas.push({
-              nome: nomeMarca,
-              titular,
-              status,
-              numero
-            });
-          }
-        }
-      });
-    }
-    
-    // 3. BUSCA NOMINATIVA EXATA
     const marcaNormalizada = normalizar(marca);
     
-    // Filtra apenas marcas registradas no Brasil e compara normalizado
+    // Procura por padrões no texto
+    const linhas = conteudoPagina.split('\n');
+    let marcaAtual = {};
+    
+    for (let i = 0; i < linhas.length; i++) {
+      const linha = linhas[i].trim();
+      
+      // Detecta início de um novo registro de marca
+      if (linha && !linha.includes('Exibindo') && !linha.includes('Filtros') && linha.length > 2 && linha.length < 100) {
+        // Se parece ser um nome de marca (linha curta, não é label)
+        if (!linha.includes(':') && !linha.includes('Titular') && !linha.includes('Classe') && !linha.includes('IPR') && !linha.includes('País') && !linha.includes('Situação') && !linha.includes('Número')) {
+          // Se já temos uma marca em construção, salva ela
+          if (marcaAtual.nome) {
+            marcasEncontradas.push({...marcaAtual});
+          }
+          // Inicia nova marca
+          marcaAtual = { nome: linha };
+        }
+      }
+      
+      // Extrai informações da marca atual
+      if (linha.includes('Titular') && i + 1 < linhas.length) {
+        marcaAtual.titular = linhas[i + 1].trim();
+      }
+      if (linha.includes('Situação') && i + 1 < linhas.length) {
+        marcaAtual.status = linhas[i + 1].trim();
+      }
+      if (linha.includes('Número') && i + 1 < linhas.length) {
+        marcaAtual.numero = linhas[i + 1].trim();
+      }
+      if (linha.includes('País de depósito') && i + 1 < linhas.length) {
+        marcaAtual.pais = linhas[i + 1].trim();
+      }
+    }
+    
+    // Adiciona a última marca se existir
+    if (marcaAtual.nome) {
+      marcasEncontradas.push(marcaAtual);
+    }
+    
+    console.log('Marcas encontradas:', marcasEncontradas.length);
+    
+    // 6. BUSCA NOMINATIVA EXATA
+    // Filtra apenas marcas do Brasil com nome exato
     const marcasExatasNoBrasil = marcasEncontradas.filter(m => {
-      const nomeNormalizado = normalizar(m.nome);
-      
-      // Verifica se é exatamente igual (após normalização)
+      const nomeNormalizado = normalizar(m.nome || '');
       const isExataMatch = nomeNormalizado === marcaNormalizada;
+      const isBrasil = (m.pais && m.pais.toLowerCase().includes('bras')) || 
+                      (m.titular && m.titular.toLowerCase().includes('brasil'));
       
-      // Verifica se é do Brasil (pode aparecer como "Brazil", "Brasil", "BR", etc.)
-      const isBrasil = m.titular.toLowerCase().includes('bras') || 
-                      m.titular.toLowerCase().includes('brazil') ||
-                      m.numero.includes('BR');
+      console.log(`Comparando: "${nomeNormalizado}" === "${marcaNormalizada}" ? ${isExataMatch}, Brasil? ${isBrasil}`);
       
       return isExataMatch && isBrasil;
     });
     
-    // 4. CLASSIFICAÇÃO DE PROBABILIDADE
+    console.log('Marcas exatas no Brasil:', marcasExatasNoBrasil.length);
+    
+    // 7. CLASSIFICAÇÃO DE PROBABILIDADE
     const temMarcaExata = marcasExatasNoBrasil.length > 0;
     const probabilidade = temMarcaExata ? 'BAIXA_PROBABILIDADE' : 'ALTA_PROBABILIDADE';
     
-    // 5. MONTA O PROMPT COM OS DADOS REAIS
-    let prompt = `Você é um advogado especialista em registros de marcas no Brasil.
-
-RESULTADO DA CONSULTA NA BASE WIPO/INPI para a marca "${marca}":
-
-`;
+    // 8. MONTA O PROMPT COM OS DADOS REAIS
+    let prompt = `Você é um advogado especialista em registros de marcas no Brasil.\n\nRESULTADO DA CONSULTA NA BASE WIPO/INPI para a marca "${marca}":\n\n`;
     
     if (temMarcaExata) {
       prompt += `⚠️ MARCA JÁ EXISTE! Encontradas ${marcasExatasNoBrasil.length} marca(s) com nome nominativo EXATO no Brasil:\n\n`;
       marcasExatasNoBrasil.forEach((m, idx) => {
-        prompt += `${idx + 1}. Nome: ${m.nome}\n   Titular: ${m.titular}\n   Status: ${m.status}\n   Número: ${m.numero}\n\n`;
+        prompt += `${idx + 1}. Nome: ${m.nome}\n   Titular: ${m.titular || 'Não informado'}\n   Status: ${m.status || 'Não informado'}\n   Número: ${m.numero || 'Não informado'}\n\n`;
       });
       prompt += `\nClassificação: BAIXA PROBABILIDADE de sucesso no registro.\n\n`;
-      prompt += `Análise: Como foram encontrados registros com o nome nominativo EXATO "${marca}" no INPI/Brasil, isso indica BAIXA PROBABILIDADE de sucesso para um novo registro com o mesmo nome.`;
+      prompt += `Análise: Como foram encontrados registros com o nome nominativo EXATO "${marca}" no INPI/Brasil, isso indica BAIXA PROBABILIDADE de sucesso para um novo registro com o mesmo nome. Recomenda-se buscar um nome alternativo ou consultar um advogado especializado em propriedade intelectual.`;
     } else {
       prompt += `✅ MARCA DISPONÍVEL! Não foram encontradas marcas com nome nominativo EXATO "${marca}" no Brasil.\n\n`;
       
       if (marcasEncontradas.length > 0) {
         prompt += `Foram encontradas ${marcasEncontradas.length} marca(s) similares (mas não exatamente iguais):\n\n`;
         marcasEncontradas.slice(0, 5).forEach((m, idx) => {
-          prompt += `${idx + 1}. ${m.nome} - ${m.titular}\n`;
+          prompt += `${idx + 1}. ${m.nome} - ${m.titular || 'Não informado'}\n`;
         });
         prompt += `\n`;
       }
       
       prompt += `Classificação: ALTA PROBABILIDADE de sucesso no registro.\n\n`;
-      prompt += `Análise: Como NÃO foram encontrados registros com o nome nominativo EXATO "${marca}" no INPI/Brasil, isso indica ALTA PROBABILIDADE de sucesso para o registro.`;
+      prompt += `Análise: Como NÃO foram encontrados registros com o nome nominativo EXATO "${marca}" no INPI/Brasil, isso indica ALTA PROBABILIDADE de sucesso para o registro. Ainda assim, recomenda-se prosseguir com o pedido de registro o quanto antes para garantir a prioridade.`;
     }
     
-    // 6. CONSULTA A OPENAI
+    console.log('Prompt para OpenAI:', prompt.substring(0, 300));
+    
+    // 9. CONSULTA A OPENAI
     const respostaOpenAI = await axios.post(
       'https://api.openai.com/v1/chat/completions',
       {
@@ -178,8 +188,10 @@ RESULTADO DA CONSULTA NA BASE WIPO/INPI para a marca "${marca}":
     );
 
     const analiseIA = respostaOpenAI.data.choices[0].message.content;
+    
+    console.log('Resposta OpenAI recebida');
 
-    // 7. RETORNA RESULTADO ESTRUTURADO
+    // 10. RETORNA RESULTADO ESTRUTURADO
     return res.status(200).json({
       sucesso: true,
       marca: marca,
@@ -200,5 +212,10 @@ RESULTADO DA CONSULTA NA BASE WIPO/INPI para a marca "${marca}":
       erro: 'Erro ao consultar base de dados de marcas',
       detalhes: erro.message
     });
+  } finally {
+    // Fecha o browser
+    if (browser) {
+      await browser.close();
+    }
   }
 }
