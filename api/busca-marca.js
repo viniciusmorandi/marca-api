@@ -42,13 +42,11 @@ export default async function handler(req, res) {
     const INFOSIMPLES_TOKEN = process.env.INFOSIMPLES_TOKEN || 'SEU_TOKEN_AQUI';
 
     // URL da API do Infosimples para INPI Marcas
-    const infosimplesUrl = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
-    
+    const infosimplesUrl = `https://api.infosimples.com/api/v2/consultas/inpi/marcas?token=${encodeURIComponent(INFOSIMPLES_TOKEN)}`;    
     console.log('Chamando API do Infosimples...');
     
     const response = await axios.post(infosimplesUrl, {
       marca: marca,
-      token: INFOSIMPLES_TOKEN,
       timeout: 300 // 5 minutos
     }, {
       headers: {
