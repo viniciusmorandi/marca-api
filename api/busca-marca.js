@@ -45,18 +45,17 @@ export default async function handler(req, res) {
 const     infosimplesUrl = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
     console.log('Chamando API do Infosimples...');
     
-      // Prepara os dados como form data (application/x-www-form-urlencoded)
-      const formData = new URLSearchParams();
-      formData.append('token', INFOSIMPLES_TOKEN);
-      formData.append('marca', marcaNormalizada);
-      formData.append('tipo', 'exata');
+            // Prepara os dados como form data string (application/x-www-form-urlencoded)
+      const formBody = `token=${encodeURIComponent(INFOSIMPLES_TOKEN)}&marca=${encodeURIComponent(marcaNormalizada)}&tipo=exata`;
       
-      const response = await axios.post(infosimplesUrl, formData, {
+      console.log('Enviando form data:', formBody.substring(0, 50) + '...');
+      
+      const response = await axios.post(infosimplesUrl, formBody, {
         timeout: 300000, // 5 minutos
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded'
         }
-      });
+      });});
     console.log('Resposta do Infosimples:', JSON.stringify(response.data).substring(0, 200));
 
     // Verifica se a consulta foi bem-sucedida
