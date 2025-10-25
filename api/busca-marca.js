@@ -55,7 +55,7 @@ const     infosimplesUrl = 'https://api.infosimples.com/api/v2/consultas/inpi/ma
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded'
         }
-      });});
+      });
     console.log('Resposta do Infosimples:', JSON.stringify(response.data).substring(0, 200));
 
     // Verifica se a consulta foi bem-sucedida
