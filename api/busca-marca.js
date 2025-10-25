@@ -115,13 +115,14 @@ export default async function handler(req, res) {
         });
       }
 
-      console.log('Nenhuma marca similar encontrada');
+      console.log('Nenhuma marca similar encontrada')
+        
+        ;
       return res.status(200).json({
         sucesso: true,
         disponivel: true,
         probabilidade: 'ALTA_PROBABILIDADE',
-        mensagem: `\u2705 Boa notícia! A marca "${marca}" aparenta estar disponível para registro.`,
-        detalhes: { fonte: 'INPI via Infosimples' }
+      mensagem: `\u2705 A marca "${marca}" n\u00e3o foi encontrada em nossa busca autom\u00e1tica.${marcaNormalizada.length <= 5 ? ' \u26a0 IMPORTANTE: Para nomes curtos, recomendamos verificar manualmente em https://busca.inpi.gov.br pois pode haver registros similares.' : ' Isso sugere que pode estar dispon\u00edvel, mas recomendamos consultar o INPI para confirmar.'}`,        detalhes: { fonte: 'INPI via Infosimples' }
       });
 
     } else {
