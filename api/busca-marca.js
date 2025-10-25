@@ -47,7 +47,7 @@ export default async function handler(req, res) {
     console.log('Chamando API do Infosimples...');
 
     // Prepara os dados como form data string
-    const formBody = `token=${encodeURIComponent(INFOSIMPLES_TOKEN)}&marca=${encodeURIComponent(marcaNormalizada)}&tipo=exata`;
+    const formBody = `token=${encodeURIComponent(INFOSIMPLES_TOKEN)}&marca=${encodeURIComponent(marcaNormalizada)}&tipo=radical`;
 
     console.log('Enviando form data:', formBody.substring(0, 50) + '...');
 
