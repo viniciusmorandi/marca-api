@@ -38,55 +38,36 @@ export default async function handler(req, res) {
 
     const marcaNormalizada = normalizar(marca);
 
-    // Faz requisição ao backend interno da WIPO que retorna JSON
-    // Este endpoint é usado pela interface web do WIPO
-    const wipoUrl = 'https://branddb.wipo.int/api/v1/brand';
-    
-    const searchParams = {
-      rows: 100, // Buscar primeiros 100 resultados
-      start: 0,
-      sort: 'score desc',
-      fg: '_void_',
-      asStructure: JSON.stringify({
-        boolean: 'AND',
-        bricks: [
-          {
-            key: 'brandName',
-            value: marca,
-            strategy: 'Simple'
-          },
-          {
-            key: 'office',
-            value: 'BR', // Filtra apenas Brasil
-            strategy: 'Simple'
-          }
-        ]
-      })
-    };
+    // Chave de API do Infosimples (você vai inserir depois)
+    const INFOSIMPLES_TOKEN = process.env.INFOSIMPLES_TOKEN || 'SEU_TOKEN_AQUI';
 
-    console.log('Chamando API da WIPO...');
+    // URL da API do Infosimples para INPI Marcas
+    const infosimplesUrl = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
     
-    const response = await axios.get(wipoUrl, {
-      params: searchParams,
+    console.log('Chamando API do Infosimples...');
+    
+    const response = await axios.post(infosimplesUrl, {
+      marca: marca,
+      token: INFOSIMPLES_TOKEN,
+      timeout: 300 // 5 minutos
+    }, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Accept': 'application/json'
-      },
-      timeout: 15000
+        'Content-Type': 'application/json'
+      }
     });
 
-    console.log(`WIPO retornou ${response.data?.response?.numFound || 0} resultados`);
+    console.log('Resposta do Infosimples:', JSON.stringify(response.data).substring(0, 200));
 
-    // Se a API retornar dados, processa
-    if (response.data && response.data.response) {
-      const resultados = response.data.response.docs || [];
-      const totalEncontrado = response.data.response.numFound || 0;
+    // Verifica se a consulta foi bem-sucedida
+    if (response.data && response.data.code === 200) {
+      const processos = response.data.data?.processos || [];
+      const totalEncontrado = response.data.data?.processos_total || 0;
 
       console.log(`Total de marcas encontradas: ${totalEncontrado}`);
 
       // Procura por correspondência exata (nome normalizado)
-      const correspondenciaExata = resultados.find(item => {
-        const nomeMarca = item.brandName || item.name || '';
+      const correspondenciaExata = processos.find(processo => {
+        const nomeMarca = processo.marca || '';
         const nomeMarcaNormalizado = normalizar(nomeMarca);
         return nomeMarcaNormalizado === marcaNormalizada;
       });
@@ -99,10 +80,11 @@ export default async function handler(req, res) {
           probabilidade: 'BAIXA_PROBABILIDADE',
           mensagem: `A marca "${marca}" já está registrada no INPI (Brasil).`,
           detalhes: {
-            marcaEncontrada: correspondenciaExata.brandName || correspondenciaExata.name,
-            numeroRegistro: correspondenciaExata.applicationNumber,
-            situacao: correspondenciaExata.status,
-            fonte: 'WIPO/INPI'
+            marcaEncontrada: correspondenciaExata.marca,
+            numeroProcesso: correspondenciaExata.numero,
+            situacao: correspondenciaExata.situacao,
+            titular: correspondenciaExata.titular,
+            fonte: 'INPI via Infosimples'
           }
         });
       } else if (totalEncontrado > 0) {
@@ -115,7 +97,7 @@ export default async function handler(req, res) {
           mensagem: `Não encontramos registro exato de "${marca}", mas existem ${totalEncontrado} marcas similares. Recomendamos análise detalhada.`,
           detalhes: {
             marcasSimilares: totalEncontrado,
-            fonte: 'WIPO/INPI'
+            fonte: 'INPI via Infosimples'
           }
         });
       } else {
@@ -127,17 +109,27 @@ export default async function handler(req, res) {
           probabilidade: 'ALTA_PROBABILIDADE',
           mensagem: `A marca "${marca}" aparenta estar disponível para registro.`,
           detalhes: {
-            fonte: 'WIPO/INPI'
+            fonte: 'INPI via Infosimples'
           }
         });
       }
     } else {
-      throw new Error('Formato de resposta inesperado da API');
+      // Erro na consulta
+      throw new Error(`Infosimples retornou erro: ${response.data?.code_message || 'Erro desconhecido'}`);
     }
 
   } catch (erro) {
     console.error('Erro ao buscar marca:', erro.message);
     console.error('Stack:', erro.stack);
+    
+    // Verifica se é erro de autenticação
+    if (erro.response?.status === 401) {
+      return res.status(500).json({
+        sucesso: false,
+        mensagem: 'Token do Infosimples inválido ou não configurado. Configure a variável INFOSIMPLES_TOKEN no Vercel.',
+        erro: 'Authentication error'
+      });
+    }
     
     return res.status(500).json({
       sucesso: false,
