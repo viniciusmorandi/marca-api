@@ -6,6 +6,51 @@ function normalizar(texto) {
   return texto.toLowerCase().trim();
 }
 
+// Verifica se situação é considerada ativa/vigente
+function isSituacaoAtiva(situacao) {
+  const s = normalizar(situacao || '');
+  return (
+    s.includes('ativo') ||
+    s.includes('registrada') ||
+    s.includes('registro') ||
+    s.includes('em vigor') ||
+    s.includes('vigente') ||
+    s.includes('deferida') ||
+    s.includes('concedida') ||
+    s.includes('publicada') // ampliar conforme necessário
+  );
+}
+
+// Coleta campos de texto relevantes do processo
+function coletarTextos(proc) {
+  return [
+    proc?.marca,
+    proc?.denominacao,
+    proc?.titulo,
+    proc?.nome,
+    proc?.sinal,
+    proc?.apresentacao,
+    proc?.niza_class || proc?.classe || proc?.classe_nice,
+    proc?.titular,
+    proc?.depositante,
+  ].filter(Boolean);
+}
+
+// Log detalhado de um processo (todos os campos)
+function logProcessoCompleto(proc, idx) {
+  try {
+    console.log(`--- Processo [${idx}] Campos completos ---`);
+    // Logar o objeto completo
+    console.log(JSON.stringify(proc, null, 2));
+    // Além disso, logar campos normalizados relevantes para comparação
+    const textos = coletarTextos(proc);
+    console.log('Campos relevantes:', textos);
+    console.log('Campos relevantes normalizados:', textos.map(normalizar));
+  } catch (e) {
+    console.log('Falha ao logar processo completo:', e?.message);
+  }
+}
+
 export default async function handler(req, res) {
   // Adicionar headers CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -16,20 +61,16 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
-
   if (req.method !== 'POST') {
     return res.status(405).end('Método inválido');
   }
-
   const { marca } = req.body;
-
   if (!marca || marca.trim() === '') {
     return res.status(400).json({
       sucesso: false,
       mensagem: 'Nome da marca é obrigatório'
     });
   }
-
   try {
     console.log(`Buscando marca: ${marca}`);
     const marcaNormalizada = normalizar(marca);
@@ -52,7 +93,6 @@ export default async function handler(req, res) {
         'Content-Type': 'application/x-www-form-urlencoded'
       }
     });
-
     // Logar toda a resposta bruta do Infosimples para debug
     console.log('=== RESPOSTA COMPLETA DO INFOSIMPLES ===');
     console.log(JSON.stringify(response.data, null, 2));
@@ -67,58 +107,56 @@ export default async function handler(req, res) {
       
       console.log(`Total de marcas encontradas: ${processos.length}`);
       
-      // Função auxiliar para coletar textos dos processos
-      const coletarTextos = (p) => [p?.marca, p?.denominacao, p?.titulo, p?.nome, p?.sinal].filter(Boolean);
-      
-      // Procura por correspondência exata APENAS EM MARCAS ATIVAS
+      // Log de todos os processos com campos completos
+      processos.forEach((p, i) => logProcessoCompleto(p, i));
+
+      // Procura por correspondência por substring EM MARCAS ATIVAS/VIGENTES
       let marcaEncontrada = null;
       
       for (const proc of processos) {
-        // Verifica se a marca está ativa
-        const situacaoNorm = normalizar(proc?.situacao || '');
-        const isAtiva = situacaoNorm.includes('ativo') || situacaoNorm.includes('registrada') || situacaoNorm.includes('registro');
-        
-        if (!isAtiva) {
-          console.log(`Ignorando marca inativa: ${proc?.marca || 'N/A'} - Situação: ${proc?.situacao}`);
-          continue; // Ignora marcas inativas
+        const situacao = proc?.situacao || proc?.status || proc?.situacao_atual;
+        const ativa = isSituacaoAtiva(situacao);
+        if (!ativa) {
+          console.log(`Ignorando marca não ativa/vigente: ${proc?.marca || 'N/A'} - Situação: ${situacao}`);
+          continue; // Ignora marcas não ativas/vigentes
         }
-        
         const candidatos = coletarTextos(proc);
-        
-        // Normalizar apenas lowercase e trim (SEM remover acentos)
         const candidatosNorm = candidatos.map(normalizar);
-        
         console.log(`Comparando marca "${marcaNormalizada}" com candidatos:`, candidatosNorm);
-        
-        // Comparação exata: nome deve ser igual ao termo pesquisado (apenas lowercase/trim, preservando acentos)
-        if (candidatosNorm.some(t => t === marcaNormalizada)) {
+        // Comparação avançada: substring (marcaNormalizada contida em qualquer candidato)
+        if (candidatosNorm.some(t => t.includes(marcaNormalizada))) {
           marcaEncontrada = proc;
-          console.log(`Match encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t === marcaNormalizada)]}`);
+          console.log(`Match por substring encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t.includes(marcaNormalizada))]}`);
           break;
         }
       }
-
       if (marcaEncontrada) {
-        console.log('Marca ativa encontrada com correspondência exata!');
+        console.log('Marca ativa/vigente encontrada com correspondência por substring!');
         return res.status(200).json({
           sucesso: true,
           disponivel: false,
-          mensagem: `A marca "${marca}" já está registrada.`,
+          mensagem: `A marca "${marca}" já está registrada (match por substring).`,
           dados_processuais: {
             numero: marcaEncontrada.numero || marcaEncontrada.processo || 'N/A',
             classe: marcaEncontrada.classe || marcaEncontrada.classe_nice || 'N/A',
             titular: marcaEncontrada.titular || marcaEncontrada.depositante || 'N/A',
-            situacao: marcaEncontrada.situacao || 'N/A'
+            situacao: marcaEncontrada.situacao || marcaEncontrada.status || 'N/A'
           }
         });
       }
+      // Nenhuma marca ativa com correspondência por substring encontrada
+      console.log('Nenhuma marca ativa/vigente com correspondência por substring encontrada');
 
-      // Nenhuma marca ativa com correspondência exata encontrada
-      console.log('Nenhuma marca ativa com correspondência exata encontrada');
+      // Se a marca é famosa e ainda assim nada veio, adicionar alerta para consulta manual
+      const alerta = processos.length === 0 ?
+        'Nenhum resultado retornado pela API. Verifique manualmente no e-INPI.' :
+        undefined;
+
       return res.status(200).json({
         sucesso: true,
         disponivel: true,
-        mensagem: `A marca "${marca}" está disponível.`
+        mensagem: `A marca "${marca}" aparenta estar disponível (sem matches ativos).`,
+        alerta
       });
       
     } else {
@@ -155,51 +193,49 @@ export default async function handler(req, res) {
           const marcaNormalizada = normalizar(req.body.marca);
           
           console.log(`Total de marcas encontradas (radical): ${processos.length}`);
+          processos.forEach((p, i) => logProcessoCompleto(p, i));
           
-          const coletarTextos = (p) => [p?.marca, p?.denominacao, p?.titulo, p?.nome, p?.sinal].filter(Boolean);
           let marcaEncontrada = null;
           
           for (const proc of processos) {
-            const situacaoNorm = normalizar(proc?.situacao || '');
-            const isAtiva = situacaoNorm.includes('ativo') || situacaoNorm.includes('registrada') || situacaoNorm.includes('registro');
-            
-            if (!isAtiva) {
-              console.log(`Ignorando marca inativa: ${proc?.marca || 'N/A'} - Situação: ${proc?.situacao}`);
+            const situacao = proc?.situacao || proc?.status || proc?.situacao_atual;
+            const ativa = isSituacaoAtiva(situacao);
+            if (!ativa) {
+              console.log(`Ignorando marca não ativa/vigente: ${proc?.marca || 'N/A'} - Situação: ${situacao}`);
               continue;
             }
-            
             const candidatos = coletarTextos(proc);
             const candidatosNorm = candidatos.map(normalizar);
-            
             console.log(`Comparando marca "${marcaNormalizada}" com candidatos:`, candidatosNorm);
-            
-            if (candidatosNorm.some(t => t === marcaNormalizada)) {
+            if (candidatosNorm.some(t => t.includes(marcaNormalizada))) {
               marcaEncontrada = proc;
-              console.log(`Match encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t === marcaNormalizada)]}`);
+              console.log(`Match por substring encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t.includes(marcaNormalizada))]}`);
               break;
             }
           }
           
           if (marcaEncontrada) {
-            console.log('Marca ativa encontrada com correspondência exata!');
+            console.log('Marca ativa/vigente encontrada com correspondência por substring!');
             return res.status(200).json({
               sucesso: true,
               disponivel: false,
-              mensagem: `A marca "${req.body.marca}" já está registrada.`,
+              mensagem: `A marca "${req.body.marca}" já está registrada (match por substring).`,
               dados_processuais: {
                 numero: marcaEncontrada.numero || marcaEncontrada.processo || 'N/A',
                 classe: marcaEncontrada.classe || marcaEncontrada.classe_nice || 'N/A',
                 titular: marcaEncontrada.titular || marcaEncontrada.depositante || 'N/A',
-                situacao: marcaEncontrada.situacao || 'N/A'
+                situacao: marcaEncontrada.situacao || marcaEncontrada.status || 'N/A'
               }
             });
           }
           
-          console.log('Nenhuma marca ativa com correspondência exata encontrada');
+          console.log('Nenhuma marca ativa/vigente com correspondência por substring encontrada');
+          const alerta = processos.length === 0 ? 'Nenhum resultado retornado pela API. Verifique manualmente no e-INPI.' : undefined;
           return res.status(200).json({
             sucesso: true,
             disponivel: true,
-            mensagem: `A marca "${req.body.marca}" está disponível.`
+            mensagem: `A marca "${req.body.marca}" aparenta estar disponível (sem matches ativos).`,
+            alerta
           });
         }
       } catch (err2) {
@@ -215,7 +251,6 @@ export default async function handler(req, res) {
         erro: 'Authentication error'
       });
     }
-
     return res.status(500).json({
       sucesso: false,
       mensagem: 'Erro ao consultar base de dados de marcas. Tente novamente.',
