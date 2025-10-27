@@ -8,18 +8,41 @@ function normalizar(texto) {
 }
 
 // Verifica se situação é considerada ativa/vigente
+// Verifica se situação é considerada ativa/vigente (BLOQUEIA novo registro)
 function isSituacaoAtiva(situacao) {
   const s = normalizar(situacao || '');
-  return (
-    s.includes('ativo') ||
-    s.includes('registrada') ||
-    s.includes('registro') ||
-    s.includes('em vigor') ||
-    s.includes('vigente') ||
-    s.includes('deferida') ||
-    s.includes('concedida') ||
-    s.includes('publicada') // ampliar conforme necessário
-  );
+  
+  // Statuses que BLOQUEIAM registro (indicam marca ativa)
+  const bloqueaRegistro = [
+    'concedida', 'concessao',
+    'registrada', 'registro',
+    'ativa', 'vigente', 'vigencia',
+    'deferida',
+    'publicada'
+  ];
+  
+  // Statuses que PERMITEM registro (não mais válidos)
+  const permiteRegistro = [
+    'arquivada', 'arquivamento',
+    'extinta',
+    'indeferida', 'negada', 'negado',
+    'caducada', 'caducado',
+    'cancelada', 'cancelado'
+  ];
+  
+  // Verifica se status indica BLOQUEIO
+  const isBlocking = bloqueaRegistro.some(term => s.includes(term));
+  
+  // Se claramente bloqueia, retorna true
+  if (isBlocking) return true;
+  
+  // Se claramente permite, retorna false
+  const isAllowing = permiteRegistro.some(term => s.includes(term));
+  if (isAllowing) return false;
+  
+  // Para valores indeterminados (em andamento, em exame, etc), ser conservador
+  // Tratar como bloqueio para evitar permitir registro em processos ativos
+  return true;
 }
 
 // Coleta campos de texto relevantes do processo
