@@ -18,7 +18,7 @@ function isSituacaoAtiva(situacao) {
     'registrada', 'registro',
     'ativa', 'vigente', 'vigencia',
     'deferida',
-    'publicada'
+    'publicada',
         'alto renome',
   ];
   
