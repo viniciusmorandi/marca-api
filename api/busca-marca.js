@@ -125,7 +125,6 @@ export default async function handler(req, res) {
     if (candidatosNorm.some(t => t === marcaNormalizada)) {          marcaEncontrada = proc;
                                                                  marcaAtiva = ativa;
           console.log(`correspondência exata encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t.includes(marcaNormalizada))]}`);
-          break;
         }
       }
       if (marcaEncontrada && marcaAtiva) {
