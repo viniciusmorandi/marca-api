@@ -265,7 +265,7 @@ export default async function handler(req, res) {
     });
 
     // ETAPA 6: DECISÃO FINAL
-    if (maxPrioridade >= 2) {
+     if (maxPrioridade >= 1) {
       // Situação ativa ou provisória = INDISPONÍVEL
       return res.status(200).json({
         marca: marcaNormalizada,
@@ -277,7 +277,8 @@ export default async function handler(req, res) {
           titular: p.titular,
           classe: p.classe
         })),
-        metadata: {
+268
+  metadata: {
           fonte: 'INPI',
           timestamp: new Date().toISOString()
         }
