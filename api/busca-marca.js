@@ -19,6 +19,7 @@ function isSituacaoAtiva(situacao) {
     'ativa', 'vigente', 'vigencia',
     'deferida',
     'publicada'
+        'alto renome',
   ];
   
   // Statuses que PERMITEM registro (não mais válidos)
