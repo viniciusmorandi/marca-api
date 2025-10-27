@@ -1,4 +1,5 @@
-import axios from 'axios';
+114
+  import axios from 'axios';
 
 // Função para normalizar texto (apenas lowercase e trim, SEM remover acentos)
 function normalizar(texto) {
@@ -110,32 +111,28 @@ export default async function handler(req, res) {
       // Log de todos os processos com campos completos
       processos.forEach((p, i) => logProcessoCompleto(p, i));
 
-      // Procura por correspondência por substring EM MARCAS ATIVAS/VIGENTES
+      // Procura por correspondência exata EM MARCAS ATIVAS/VIGENTES
       let marcaEncontrada = null;
+        let marcaAtiva = false;
       
       for (const proc of processos) {
         const situacao = proc?.situacao || proc?.status || proc?.situacao_atual;
         const ativa = isSituacaoAtiva(situacao);
-        if (!ativa) {
-          console.log(`Ignorando marca não ativa/vigente: ${proc?.marca || 'N/A'} - Situação: ${situacao}`);
-          continue; // Ignora marcas não ativas/vigentes
-        }
         const candidatos = coletarTextos(proc);
         const candidatosNorm = candidatos.map(normalizar);
         console.log(`Comparando marca "${marcaNormalizada}" com candidatos:`, candidatosNorm);
         // Comparação avançada: substring (marcaNormalizada contida em qualquer candidato)
-        if (candidatosNorm.some(t => t.includes(marcaNormalizada))) {
-          marcaEncontrada = proc;
-          console.log(`Match por substring encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t.includes(marcaNormalizada))]}`);
+    if (candidatosNorm.some(t => t === marcaNormalizada)) {          marcaEncontrada = proc;
+                                                                 marcaAtiva = ativa;
+          console.log(`correspondência exata encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t.includes(marcaNormalizada))]}`);
           break;
         }
       }
-      if (marcaEncontrada) {
-        console.log('Marca ativa/vigente encontrada com correspondência por substring!');
-        return res.status(200).json({
+      if (marcaEncontrada && marcaAtiva) {
+    console.log('Marca ativa/vigente encontrada com correspondência exata!');        return res.status(200).json({
           sucesso: true,
           disponivel: false,
-          mensagem: `A marca "${marca}" já está registrada (match por substring).`,
+          mensagem: `A marca "${marca}" já está registrada (correspondência exata).`,
           dados_processuais: {
             numero: marcaEncontrada.numero || marcaEncontrada.processo || 'N/A',
             classe: marcaEncontrada.classe || marcaEncontrada.classe_nice || 'N/A',
@@ -144,9 +141,8 @@ export default async function handler(req, res) {
           }
         });
       }
-      // Nenhuma marca ativa com correspondência por substring encontrada
-      console.log('Nenhuma marca ativa/vigente com correspondência por substring encontrada');
-
+      // Nenhuma marca ativa com correspondência exata encontrada
+    console.log('Nenhuma marca ativa/vigente com correspondência exata              encontrada');
       // Se a marca é famosa e ainda assim nada veio, adicionar alerta para consulta manual
       const alerta = processos.length === 0 ?
         'Nenhum resultado retornado pela API. Verifique manualmente no e-INPI.' :
@@ -209,19 +205,21 @@ export default async function handler(req, res) {
             console.log(`Comparando marca "${marcaNormalizada}" com candidatos:`, candidatosNorm);
             if (candidatosNorm.some(t => t.includes(marcaNormalizada))) {
               marcaEncontrada = proc;
-              console.log(`Match por substring encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t.includes(marcaNormalizada))]}`);
+              console.log(`correspondência exata encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t.includes(marcaNormalizada))]}`);
               break;
             }
           }
           
           if (marcaEncontrada) {
-            console.log('Marca ativa/vigente encontrada com correspondência por substring!');
+            console.log('Marca ativa/vigente encontrada com correspondência exata!');
             return res.status(200).json({
               sucesso: true,
               disponivel: false,
-              mensagem: `A marca "${req.body.marca}" já está registrada (match por substring).`,
+              mensagem: `A marca "${req.body.marca}" já está registrada (134
+              ).`,
               dados_processuais: {
-                numero: marcaEncontrada.numero || marcaEncontrada.processo || 'N/A',
+                numero: marcaEncontrada.numero || 115
+                  .processo || 'N/A',
                 classe: marcaEncontrada.classe || marcaEncontrada.classe_nice || 'N/A',
                 titular: marcaEncontrada.titular || marcaEncontrada.depositante || 'N/A',
                 situacao: marcaEncontrada.situacao || marcaEncontrada.status || 'N/A'
@@ -229,7 +227,7 @@ export default async function handler(req, res) {
             });
           }
           
-          console.log('Nenhuma marca ativa/vigente com correspondência por substring encontrada');
+          console.log('Nenhuma marca ativa/vigente com correspondência exata encontrada');
           const alerta = processos.length === 0 ? 'Nenhum resultado retornado pela API. Verifique manualmente no e-INPI.' : undefined;
           return res.status(200).json({
             sucesso: true,
