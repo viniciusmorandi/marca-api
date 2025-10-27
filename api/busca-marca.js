@@ -155,12 +155,16 @@ async function consultarINPI(marca) {
   } catch (error) {
     // Mapear erro 400 do INPI (marca não encontrada) para resposta limpa
     if (error.response && error.response.status === 400) {
-      return {
-        code: 200,
-        code_message: 'Successful',
-        processos: []
-      };
-    }
+// Treat API errors conservatively - unknown status blocks registration
+        console.error('INPI API Error 400 for marca:', marca, error.message);
+        return {
+          code: 200,
+          code_message: 'API Error - Treating as blocked',
+          disponivel: false,
+          motivo: 'Não foi possível verificar no INPI. Status bloqueado por precaução.',
+          processos: []
+        };
+      }
     throw error;
   }
 }
