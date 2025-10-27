@@ -104,7 +104,7 @@ export default async function handler(req, res) {
     
     // Verifica se a consulta foi bem-sucedida
     if (response.data && response.data.code === 200) {
-      const processos = response.data.data?.processos || [];
+      const processos = response.data[0]?.processos || [];
       
       console.log(`Total de marcas encontradas: ${processos.length}`);
       
@@ -185,7 +185,7 @@ export default async function handler(req, res) {
         console.log('=== FIM DA RESPOSTA ===');
         
         if (response.data && response.data.code === 200) {
-          const processos = response.data.data?.processos || [];
+          const processos = response.data[0]?.processos || [];
           const marcaNormalizada = normalizar(req.body.marca);
           
           console.log(`Total de marcas encontradas (radical): ${processos.length}`);
