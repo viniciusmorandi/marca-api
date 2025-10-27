@@ -277,7 +277,6 @@ export default async function handler(req, res) {
           titular: p.titular,
           classe: p.classe
         })),
-268
   metadata: {
           fonte: 'INPI',
           timestamp: new Date().toISOString()
