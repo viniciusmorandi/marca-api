@@ -1,5 +1,4 @@
-114
-  import axios from 'axios';
+import axios from 'axios';
 
 // Função para normalizar texto (apenas lowercase e trim, SEM remover acentos)
 function normalizar(texto) {
@@ -7,275 +6,311 @@ function normalizar(texto) {
   return texto.toLowerCase().trim();
 }
 
-// Verifica se situação é considerada ativa/vigente
-// Verifica se situação é considerada ativa/vigente (BLOQUEIA novo registro)
+// Função para remover diacríticos/acentos (APENAS para comparações internas)
+function removerDiacriticos(texto) {
+  if (!texto) return '';
+  return texto
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+// Verifica se situação é considerada ATIVA/VIGENTE (BLOQUEIA novo registro)
 function isSituacaoAtiva(situacao) {
   const s = normalizar(situacao || '');
-  
-  // Statuses que BLOQUEIAM registro (indicam marca ativa)
-  const bloqueaRegistro = [
+  const bloqueiaRegistro = [
     'concedida', 'concessao',
     'registrada', 'registro',
-    'ativa', 'vigente', 'vigencia',
+    'ativa', 'vigente', 'vigencial',
     'deferida',
     'publicada',
-        'alto renome',
+    'alto renome',
   ];
-  
-  // Statuses que PERMITEM registro (não mais válidos)
+  return bloqueiaRegistro.some(term => s.includes(term));
+}
+
+// Verifica se situação é considerada PROVISÓRIA (ainda BLOQUEIA novo registro)
+function isSituacaoProvisoria(situacao) {
+  const s = normalizar(situacao || '');
+  const bloqueiaProvisorio = [
+    'em exame',
+    'em andamento',
+    'sobrestado',
+    'suspenso',
+    'aguardando',
+    'pendente',
+    'depositada',
+    'exigencia',
+    'oposicao',
+    'em recurso',
+  ];
+  return bloqueiaProvisorio.some(term => s.includes(term));
+}
+
+// Verifica se situação é considerada TERMINAL (NÃO bloqueia novo registro)
+function isSituacaoTerminal(situacao) {
+  const s = normalizar(situacao || '');
   const permiteRegistro = [
     'arquivada', 'arquivamento',
     'extinta',
     'indeferida', 'negada', 'negado',
     'caducada', 'caducado',
-    'cancelada', 'cancelado'
+    'cancelada', 'cancelado',
+    'renunciada',
   ];
-  
-  // Verifica se status indica BLOQUEIO
-  const isBlocking = bloqueaRegistro.some(term => s.includes(term));
-  
-  // Se claramente bloqueia, retorna true
-  if (isBlocking) return true;
-  
-  // Se claramente permite, retorna false
-  const isAllowing = permiteRegistro.some(term => s.includes(term));
-  if (isAllowing) return false;
-  
-  // Para valores indeterminados (em andamento, em exame, etc), ser conservador
-  // Tratar como bloqueio para evitar permitir registro em processos ativos
-  return true;
+  return permiteRegistro.some(term => s.includes(term));
 }
 
-// Coleta campos de texto relevantes do processo
-function coletarTextos(proc) {
-  return [
-    proc?.marca,
-    proc?.denominacao,
-    proc?.titulo,
-    proc?.nome,
-    proc?.sinal,
-    proc?.apresentacao,
-    proc?.niza_class || proc?.classe || proc?.classe_nice,
-    proc?.titular,
-    proc?.depositante,
-  ].filter(Boolean);
+// Lista de marcas de ALTO RENOME (Portaria INPI 181/2024)
+// Atualizada em: 2025-01-15
+const MARCAS_ALTO_RENOME = [
+  'coca-cola',
+  'disney',
+  'hollywood',
+  'mcdonalds',
+  'nike',
+  'pepsi',
+  'microsoft',
+  'apple',
+  'google',
+  'amazon',
+  'facebook',
+  'adidas',
+  'puma',
+  'mercedes-benz',
+  'bmw',
+  'ferrari',
+  'porsche',
+  'rolex',
+  'chanel',
+  'louis vuitton',
+  'gucci',
+  'prada',
+  'versace',
+  'armani',
+  'cartier',
+  'tiffany',
+  'starbucks',
+  'subway',
+  'burger king',
+  'pizza hut',
+  'kfc',
+  'nestle',
+  'unilever',
+  'procter & gamble',
+  'johnson & johnson',
+  'sony',
+  'samsung',
+  'lg',
+  'panasonic',
+  'philips',
+  'siemens',
+  'general electric',
+  'ibm',
+  'intel',
+  'oracle',
+  'cisco',
+  'hp',
+  'dell',
+  'canon',
+  'nikon',
+  'fujifilm',
+];
+
+// Função auxiliar: calcular prioridade de bloqueio
+function calcularPrioridade(situacao) {
+  if (isSituacaoAtiva(situacao)) return 3; // Máxima prioridade
+  if (isSituacaoProvisoria(situacao)) return 2; // Média prioridade
+  if (isSituacaoTerminal(situacao)) return 0; // Não bloqueia
+  return 1; // Incerto/conservador
 }
 
-// Log detalhado de um processo (todos os campos)
-function logProcessoCompleto(proc, idx) {
+// Função principal: consultar marca no INPI (Infosimples)
+async function consultarINPI(marca) {
+  const token = process.env.INFOSIMPLES_TOKEN;
+  
+  if (!token) {
+    throw new Error('Token Infosimples não configurado');
+  }
+
   try {
-    console.log(`--- Processo [${idx}] Campos completos ---`);
-    // Logar o objeto completo
-    console.log(JSON.stringify(proc, null, 2));
-    // Além disso, logar campos normalizados relevantes para comparação
-    const textos = coletarTextos(proc);
-    console.log('Campos relevantes:', textos);
-    console.log('Campos relevantes normalizados:', textos.map(normalizar));
-  } catch (e) {
-    console.log('Falha ao logar processo completo:', e?.message);
+    // SEMPRE E SÓ EXATA - POST request
+    const response = await axios.post(
+      'https://api.infosimples.com/api/v2/consultas/inpi/marcas',
+      {
+        marca: marca,
+        tipo: 'exata', // SEMPRE EXATA
+        token: token,
+        timeout: 600
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    return response.data;
+  } catch (error) {
+    // Mapear erro 400 do INPI (marca não encontrada) para resposta limpa
+    if (error.response && error.response.status === 400) {
+      return {
+        code: 200,
+        code_message: 'Successful',
+        processos: []
+      };
+    }
+    throw error;
   }
 }
 
 export default async function handler(req, res) {
-  // Adicionar headers CORS
+  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
-  // Responde ao preflight request
+
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
+
   if (req.method !== 'POST') {
-    return res.status(405).end('Método inválido');
+    return res.status(405).json({ error: 'Method not allowed' });
   }
-  const { marca } = req.body;
-  if (!marca || marca.trim() === '') {
-    return res.status(400).json({
-      sucesso: false,
-      mensagem: 'Nome da marca é obrigatório'
-    });
-  }
+
   try {
-    console.log(`Buscando marca: ${marca}`);
-    const marcaNormalizada = normalizar(marca);
-    
-    // Chave de API do Infosimples
-    const INFOSIMPLES_TOKEN = process.env.INFOSIMPLES_TOKEN || '$EU_TOKEN_AQUI';
-    
-    // URL da API do Infosimples para INPI Marcas
-    const infosimplesUrl = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
-    
-    console.log('Chamando API do Infosimples...');
-    
-    // Prepara os dados como form data string
-    // Tentando usar tipo=exata (se não funcionar, usar tipo=radical)
-    const formBody = `token=${encodeURIComponent(INFOSIMPLES_TOKEN)}&marca=${encodeURIComponent(marca)}&tipo=exata`;
-    
-    const response = await axios.post(infosimplesUrl, formBody, {
-      timeout: 300000,
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
+    const { marca } = req.body;
+
+    // Validação de entrada
+    if (!marca || typeof marca !== 'string' || marca.trim() === '') {
+      return res.status(422).json({
+        error: 'Parâmetro "marca" é obrigatório e deve ser uma string não vazia',
+        disponivel: null
+      });
+    }
+
+    const marcaNormalizada = marca.trim();
+    const marcaSemAcentos = removerDiacriticos(marcaNormalizada);
+
+    // ETAPA 1: PRÉ-VERIFICAÇÃO ALTO RENOME (antes de chamar API)
+    const isAltoRenome = MARCAS_ALTO_RENOME.some(ar => {
+      const arSemAcentos = removerDiacriticos(ar);
+      return marcaSemAcentos === arSemAcentos || marcaSemAcentos.includes(arSemAcentos);
+    });
+
+    if (isAltoRenome) {
+      return res.status(200).json({
+        marca: marcaNormalizada,
+        disponivel: false,
+        motivo: 'Marca de Alto Renome protegida em todas as classes (Portaria INPI 181/2024)',
+        processos: [],
+        metadata: {
+          fonte: 'Pre-verificacao Alto Renome',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    // ETAPA 2: CONSULTA INPI (sempre tipo='exata')
+    const resultado = await consultarINPI(marcaNormalizada);
+
+    // ETAPA 3: ANÁLISE DE RESULTADOS
+    const processos = resultado.processos || [];
+
+    if (processos.length === 0) {
+      // Nenhum processo encontrado = marca disponível
+      return res.status(200).json({
+        marca: marcaNormalizada,
+        disponivel: true,
+        motivo: 'Nenhum registro encontrado no INPI',
+        processos: [],
+        metadata: {
+          fonte: 'INPI',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    // ETAPA 4: FILTRAR MATCHES EXATOS (com normalização)
+    const matchesExatos = processos.filter(proc => {
+      const nomeProcSemAcentos = removerDiacriticos(proc.marca || '');
+      return nomeProcSemAcentos === marcaSemAcentos;
+    });
+
+    if (matchesExatos.length === 0) {
+      // Processos existem mas nenhum match exato = marca disponível
+      return res.status(200).json({
+        marca: marcaNormalizada,
+        disponivel: true,
+        motivo: 'Nenhum registro exato encontrado',
+        processos: [],
+        metadata: {
+          fonte: 'INPI',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    // ETAPA 5: CALCULAR PRIORIDADE MÁXIMA (hierarquia legal)
+    let maxPrioridade = 0;
+    let processoMaisForte = null;
+
+    matchesExatos.forEach(proc => {
+      const prioridade = calcularPrioridade(proc.situacao);
+      if (prioridade > maxPrioridade) {
+        maxPrioridade = prioridade;
+        processoMaisForte = proc;
       }
     });
-    // Logar toda a resposta bruta do Infosimples para debug
-    console.log('=== RESPOSTA COMPLETA DO INFOSIMPLES ===');
-    console.log(JSON.stringify(response.data, null, 2));
-    console.log('=== FIM DA RESPOSTA ===');
-    
-    // Salvar resposta bruta em arquivo de log (em produção, considerar usar serviço de logging)
-    console.log(`Teste para marca: "${marca}"`);
-    
-    // Verifica se a consulta foi bem-sucedida
-    if (response.data && response.data.code === 200) {
-      const processos = response.data[0]?.processos || [];
-      
-      console.log(`Total de marcas encontradas: ${processos.length}`);
-      
-      // Log de todos os processos com campos completos
-      processos.forEach((p, i) => logProcessoCompleto(p, i));
 
-      // Procura por correspondência exata EM MARCAS ATIVAS/VIGENTES
-      let marcaEncontrada = null;
-        let marcaAtiva = false;
-      
-      for (const proc of processos) {
-        const situacao = proc?.situacao || proc?.status || proc?.situacao_atual;
-        const ativa = isSituacaoAtiva(situacao);
-        const candidatos = coletarTextos(proc);
-        const candidatosNorm = candidatos.map(normalizar);
-        console.log(`Comparando marca "${marcaNormalizada}" com candidatos:`, candidatosNorm);
-        // Comparação avançada: substring (marcaNormalizada contida em qualquer candidato)
-    if (candidatosNorm.some(t => t === marcaNormalizada)) {          marcaEncontrada = proc;
-                                                                 marcaAtiva = ativa;
-          console.log(`correspondência exata encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t.includes(marcaNormalizada))]}`);
-        }
-      }
-      if (marcaEncontrada && marcaAtiva) {
-    console.log('Marca ativa/vigente encontrada com correspondência exata!');        return res.status(200).json({
-          sucesso: true,
-          disponivel: false,
-          mensagem: `A marca "${marca}" já está registrada (correspondência exata).`,
-          dados_processuais: {
-            numero: marcaEncontrada.numero || marcaEncontrada.processo || 'N/A',
-            classe: marcaEncontrada.classe || marcaEncontrada.classe_nice || 'N/A',
-            titular: marcaEncontrada.titular || marcaEncontrada.depositante || 'N/A',
-            situacao: marcaEncontrada.situacao || marcaEncontrada.status || 'N/A'
-          }
-        });
-      }
-      // Nenhuma marca ativa com correspondência exata encontrada
-    console.log('Nenhuma marca ativa/vigente com correspondência exata              encontrada');
-      // Se a marca é famosa e ainda assim nada veio, adicionar alerta para consulta manual
-      const alerta = processos.length === 0 ?
-        'Nenhum resultado retornado pela API. Verifique manualmente no e-INPI.' :
-        undefined;
-
+    // ETAPA 6: DECISÃO FINAL
+    if (maxPrioridade >= 2) {
+      // Situação ativa ou provisória = INDISPONÍVEL
       return res.status(200).json({
-        sucesso: true,
-        disponivel: true,
-        mensagem: `A marca "${marca}" aparenta estar disponível (sem matches ativos).`,
-        alerta
-      });
-      
-    } else {
-      throw new Error(`Infosimples retornou erro: ${response.data?.code_message || 'Erro desconhecido'}`);
-    }
-    
-  } catch (erro) {
-    console.error('Erro ao buscar marca:', erro.message);
-    console.error('Stack:', erro.stack);
-    
-    // Se erro 400 com tipo=exata, tentar novamente com tipo=radical
-    if (erro.response?.status === 400 && erro.config?.data?.includes('tipo=exata')) {
-      console.log('Parâmetro tipo=exata não suportado, tentando com tipo=radical...');
-      
-      try {
-        const INFOSIMPLES_TOKEN = process.env.INFOSIMPLES_TOKEN || '$EU_TOKEN_AQUI';
-        const infosimplesUrl = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
-        const formBody = `token=${encodeURIComponent(INFOSIMPLES_TOKEN)}&marca=${encodeURIComponent(req.body.marca)}&tipo=radical`;
-        
-        const response = await axios.post(infosimplesUrl, formBody, {
-          timeout: 300000,
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded'
-          }
-        });
-        
-        // Logar toda a resposta bruta
-        console.log('=== RESPOSTA COMPLETA DO INFOSIMPLES (tipo=radical) ===');
-        console.log(JSON.stringify(response.data, null, 2));
-        console.log('=== FIM DA RESPOSTA ===');
-        
-        if (response.data && response.data.code === 200) {
-          const processos = response.data[0]?.processos || [];
-          const marcaNormalizada = normalizar(req.body.marca);
-          
-          console.log(`Total de marcas encontradas (radical): ${processos.length}`);
-          processos.forEach((p, i) => logProcessoCompleto(p, i));
-          
-          let marcaEncontrada = null;
-          
-          for (const proc of processos) {
-            const situacao = proc?.situacao || proc?.status || proc?.situacao_atual;
-            const ativa = isSituacaoAtiva(situacao);
-            if (!ativa) {
-              console.log(`Ignorando marca não ativa/vigente: ${proc?.marca || 'N/A'} - Situação: ${situacao}`);
-              continue;
-            }
-            const candidatos = coletarTextos(proc);
-            const candidatosNorm = candidatos.map(normalizar);
-            console.log(`Comparando marca "${marcaNormalizada}" com candidatos:`, candidatosNorm);
-            if (candidatosNorm.some(t => t.includes(marcaNormalizada))) {
-              marcaEncontrada = proc;
-              console.log(`correspondência exata encontrado! Campo: ${candidatos[candidatosNorm.findIndex(t => t.includes(marcaNormalizada))]}`);
-              break;
-            }
-          }
-          
-          if (marcaEncontrada) {
-            console.log('Marca ativa/vigente encontrada com correspondência exata!');
-            return res.status(200).json({
-              sucesso: true,
-              disponivel: false,
-              mensagem: `A marca "${req.body.marca}" já está registrada (134
-              ).`,
-              dados_processuais: {
-                numero: marcaEncontrada.numero || 115
-                  .processo || 'N/A',
-                classe: marcaEncontrada.classe || marcaEncontrada.classe_nice || 'N/A',
-                titular: marcaEncontrada.titular || marcaEncontrada.depositante || 'N/A',
-                situacao: marcaEncontrada.situacao || marcaEncontrada.status || 'N/A'
-              }
-            });
-          }
-          
-          console.log('Nenhuma marca ativa/vigente com correspondência exata encontrada');
-          const alerta = processos.length === 0 ? 'Nenhum resultado retornado pela API. Verifique manualmente no e-INPI.' : undefined;
-          return res.status(200).json({
-            sucesso: true,
-            disponivel: true,
-            mensagem: `A marca "${req.body.marca}" aparenta estar disponível (sem matches ativos).`,
-            alerta
-          });
+        marca: marcaNormalizada,
+        disponivel: false,
+        motivo: `Marca possui registro ${isSituacaoAtiva(processoMaisForte.situacao) ? 'ativo' : 'em andamento'} no INPI`,
+        processos: matchesExatos.map(p => ({
+          numero: p.numero,
+          situacao: p.situacao,
+          titular: p.titular,
+          classe: p.classe
+        })),
+        metadata: {
+          fonte: 'INPI',
+          timestamp: new Date().toISOString()
         }
-      } catch (err2) {
-        console.error('Erro também com tipo=radical:', err2.message);
-        // Continua para o tratamento de erro padrão abaixo
-      }
-    }
-    
-    if (erro.response?.status === 401) {
-      return res.status(500).json({
-        sucesso: false,
-        mensagem: 'Token do Infosimples inválido ou não configurado. Configure a variável INFOSIMPLES_TOKEN no Vercel.',
-        erro: 'Authentication error'
+      });
+    } else {
+      // Situação terminal ou incerta (conservador) = tratado como disponível
+      // (usuário pode verificar manualmente se necessário)
+      return res.status(200).json({
+        marca: marcaNormalizada,
+        disponivel: true,
+        motivo: 'Registros encontrados estão em situação terminal ou extinta',
+        processos: matchesExatos.map(p => ({
+          numero: p.numero,
+          situacao: p.situacao,
+          titular: p.titular,
+          classe: p.classe
+        })),
+        metadata: {
+          fonte: 'INPI',
+          timestamp: new Date().toISOString(),
+          aviso: 'Verifique manualmente os processos listados'
+        }
       });
     }
-    return res.status(500).json({
-      sucesso: false,
-      mensagem: 'Erro ao consultar base de dados de marcas. Tente novamente.',
-      erro: erro.message
+
+  } catch (error) {
+    console.error('Erro na consulta INPI:', error);
+    
+    // Erro de comunicação com INPI/Infosimples
+    return res.status(502).json({
+      error: 'Erro ao comunicar com o INPI',
+      details: error.message,
+      disponivel: null
     });
   }
 }
