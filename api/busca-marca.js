@@ -1,189 +1,106 @@
 import axios from 'axios';
 
-// ==============================================================================
-// HELPERS: Normalização e Verificação de Situações Permissivas
-// ==============================================================================
+// ============================ Helpers ============================
+const normalize = (s='') =>
+  s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
 
-/**
- * Normaliza texto: remove diacríticos/acentos, converte para lowercase e trim
- * Usa NFD (Normalization Form Decomposed) para separar base + diacríticos
- */
-function normalize(texto) {
-  if (!texto) return '';
-  return texto
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '') // Remove diacríticos
-    .toLowerCase()
-    .trim();
-}
-
-/**
- * Verifica se a situação permite novo registro (allowlist)
- * Situações TERMINAIS = marca não está mais ativa/válida = permite registro
- * Qualquer situação fora desta lista = INDISPONÍVEL
- */
-function situacaoPermite(situacao) {
+// Situações TERMINAIS (qualquer outra => INDISPONÍVEL)
+const TERMINAIS_STEMS = [
+  'indeferid', 'negad', 'arquiv', 'extint', 'caducad',
+  'cancelad', 'nulidade procedent', 'nulo', 'renunci'
+];
+const situacaoPermite = (situacao='') => {
   const s = normalize(situacao);
-  const TERMINAIS_STEMS = [
-    'indeferid',           // indeferida/indeferido
-    'negad',               // negada/negado
-    'arquiv',              // arquivada/arquivado/arquivamento
-    'extint',              // extinta/extinto/registro de marca extinto
-    'caducad',             // caducada/caducado
-    'cancelad',            // cancelada/cancelado
-    'nulidade procedent',  // nulidade procedente
-    'nulo',
-    'renunci'              // renúncia/renuncia
-  ];
-  return TERMINAIS_STEMS.some(term => s.includes(term));
-}
+  return TERMINAIS_STEMS.some(stem => s.includes(stem));
+};
 
-// ==============================================================================
-// CONSULTA INPI (Infosimples)
-// ==============================================================================
+// Extrai processos do formato Infosimples (data: [{ processos: [...] }, ...])
+const extrairProcessos = (resultado) => {
+  if (!resultado || !Array.isArray(resultado.data)) return [];
+  return resultado.data.flatMap(b => Array.isArray(b.processos) ? b.processos : []);
+};
 
-/**
- * Consulta a API do INPI via Infosimples
- * Sempre usa tipo="exata" (NUNCA radical ou outro)
- * Timeout configurado no axios (10s)
- */
-async function consultarINPI(marca) {
-    console.log('DEBUG: consultarINPI called with marca:', marca);
-  const url = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
-  
-  const requestBody = {
-    token: process.env.INFOSIMPLES_TOKEN,
-    marca: marca,
-    tipo: 'exata'  // SEMPRE E SÓ EXATA - nunca usar radical
-  };
-    console.log('DEBUG: requestBody =', { ...requestBody, token: '***MASKED***' });
-
-  // Timeout no config do axios (3º parâmetro), NÃO no body
-  const response = await axios.post(url, requestBody, {
-    timeout: 10000
-  });
-
-  return response.data;
-    console.log('DEBUG: Infosimples response status:', response.status, 'data length:', JSON.stringify(response.data).length);
-    console.log('DEBUG: response.data.processos:', response.data.processos?.length || 0, 'items');
-}
-
-// ==============================================================================
-// LÓGICA DE DECISÃO: Disponibilidade da Marca
-// ==============================================================================
-
-/**
- * Decide se a marca está disponível com base nas situações retornadas pelo INPI
- * REGRA SIMPLES:
- *  1. Sem processos → DISPONÍVEL
- *  2. Processos mas sem match exato → DISPONÍVEL
- *  3. Match exato → DISPONÍVEL somente se TODAS situações estão em TERMINAIS_STEMS
- *                   Qualquer situação fora da allowlist (incluindo Alto Renome,
- *                   em vigor, em exame, etc.) → INDISPONÍVEL
- */
+// Decide disponibilidade a partir dos processos (regra simples)
 function decidirDisponibilidade(marca, processos) {
-  // Sem processos = DISPONÍVEL
-  if (!processos || processos.length === 0) {
+  if (!Array.isArray(processos) || processos.length === 0) {
+    return { disponivel: true, motivo: 'Nenhum registro encontrado (busca exata)', processos: [] };
+  }
+
+  const alvo = normalize(marca);
+  const exatos = processos.filter(p => normalize(p.marca || '') === alvo);
+
+  if (exatos.length === 0) {
+    return { disponivel: true, motivo: 'Nenhum registro exato encontrado', processos: [] };
+  }
+
+  const todasPermitem = exatos.every(p => situacaoPermite(p.situacao));
+  if (todasPermitem) {
     return {
       disponivel: true,
-      motivo: 'Nenhum registro encontrado (busca exata)',
-      processos: []
+      motivo: 'Somente situações terminais que permitem novo registro',
+      processos: exatos.map(p => ({ numero: p.numero, situacao: p.situacao, titular: p.titular, classe: p.classe }))
     };
   }
 
-  // Filtrar apenas matches exatos (comparação normalizada)
-  const marcaNormalizada = normalize(marca);
-  const matchesExatos = processos.filter(p =>
-    normalize(p.marca) === marcaNormalizada
-  );
-
-  // Sem matches exatos = DISPONÍVEL
-  if (matchesExatos.length === 0) {
-    return {
-      disponivel: true,
-      motivo: 'Nenhum registro exato encontrado',
-      processos: []
-    };
-  }
-
-  // Com matches exatos: verificar se TODAS as situações são permissivas
-  const todasPermissivas = matchesExatos.every(p => situacaoPermite(p.situacao));
-
-  if (todasPermissivas) {
-    return {
-      disponivel: true,
-      motivo: 'Todos os registros encontrados estão em situação que permite novo registro',
-      processos: matchesExatos.map(p => ({
-        numero: p.numero,
-        situacao: p.situacao,
-        titular: p.titular,
-        classe: p.classe
-      }))
-    };
-  }
-
-  // Pelo menos uma situação não-permissiva = INDISPONÍVEL
   return {
     disponivel: false,
-    motivo: 'Marca já registrada ou em processo ativo',
-    processos: matchesExatos.map(p => ({
-      numero: p.numero,
-      situacao: p.situacao,
-      titular: p.titular,
-      classe: p.classe
-    }))
+    motivo: 'Há situação(ões) não-terminais (ex.: registro em vigor/alto renome/em exame/publicada/sobrestado)',
+    processos: exatos.map(p => ({ numero: p.numero, situacao: p.situacao, titular: p.titular, classe: p.classe }))
   };
 }
 
-// ==============================================================================
-// HANDLER PRINCIPAL (Vercel Serverless function)
-// ==============================================================================
+// ============================ INPI (Infosimples) ============================
+async function consultarINPI(marca) {
+  const token = process.env.INFOSIMPLES_TOKEN;
+  if (!token) {
+    const e = new Error('Token Infosimples não configurado');
+    e.code = 'CONFIG';
+    throw e;
+  }
 
+  const url = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
+  const requestBody = { token, marca, tipo: 'exata' }; // SEMPRE E SÓ EXATA
+
+  const response = await axios.post(url, requestBody, {
+    headers: { 'Content-Type': 'application/json' },
+    timeout: 15000
+  });
+
+  return response.data; // formato com { data: [{ processos: [...] , ... }] }
+}
+
+// ============================ Handler ============================
 export default async function handler(req, res) {
-  const startTime = Date.now();
+  const t0 = Date.now();
 
-  // CORS headers
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  // Validação: apenas POST
   if (req.method !== 'POST') {
-    return res.status(405).json({
-      erro: 'Método não permitido',
-      mensagem: 'Use POST para consultar marcas'
-    });
+    return res.status(405).json({ erro: 'Método não permitido', mensagem: 'Use POST para consultar marcas' });
   }
 
-  // Validação: campo "marca" obrigatório
-  const { marca } = req.body;
-  if (!marca || typeof marca !== 'string' || marca.trim().length === 0) {
-    return res.status(422).json({
-      erro: 'Validação falhou',
-      mensagem: 'O campo "marca" é obrigatório e deve ser uma string não vazia'
-    });
+  const { marca } = req.body || {};
+  if (!marca || typeof marca !== 'string' || marca.trim() === '') {
+    return res.status(422).json({ erro: 'Validação falhou', mensagem: 'O campo "marca" é obrigatório e não pode ser vazio' });
   }
 
   const marcaTrimmed = marca.trim();
 
   try {
-    // Consulta ao INPI (envia exatamente como o usuário digitou)
+    // 1) Consulta exata
     const resultado = await consultarINPI(marcaTrimmed);
-        console.log('DEBUG: Handler received marca:', marcaTrimmed);
 
-    // Extrai processos retornados
-    const processos = resultado?.data?.processos || [];
-        console.log('DEBUG: processos array from INPI:', processos.length, 'items');
+    // 2) Extrai processos (pode vir paginado em "data" – Infosimples já consolida por página)
+    const processos = extrairProcessos(resultado);
 
-    // Decide disponibilidade
+    // 3) Decide
     const decisao = decidirDisponibilidade(marcaTrimmed, processos);
 
-    // Resposta final
+    // 4) Resposta
     return res.status(200).json({
       marca: marcaTrimmed,
       disponivel: decisao.disponivel,
@@ -193,39 +110,29 @@ export default async function handler(req, res) {
         fonte: 'INPI',
         tipo_busca: 'exata',
         timestamp: new Date().toISOString(),
-        tempo_resposta_ms: Date.now() - startTime
+        tempo_resposta_ms: Date.now() - t0
       }
     });
 
   } catch (error) {
-    console.error('Erro ao consultar INPI:', {
-      marca: marcaTrimmed,
-      erro: error.message,
-      status: error.response?.status,
-      data: error.response?.data
-    });
-
-    // Erro de upstream (INPI/Infosimples indisponível)
-    if (error.response) {
+    // Upstream com status conhecido
+    if (error?.response) {
+      const status = error.response.status;
+      // 4xx/5xx da Infosimples/INPI => trate como 502 (upstream)
       return res.status(502).json({
         erro: 'Erro ao consultar INPI',
-        mensagem: 'O serviço de consulta de marcas está temporariamente indisponível',
-        detalhes: error.response.data?.message || error.message
+        mensagem: 'Serviço de consulta temporariamente indisponível',
+        detalhes: error.response.data?.message || error.message,
+        upstream_status: status
       });
     }
 
-    // Timeout ou erro de rede
-    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
-      return res.status(504).json({
-        erro: 'Timeout',
-        mensagem: 'A consulta ao INPI demorou muito tempo. Tente novamente.'
-      });
+    // Timeout/rede
+    if (error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT') {
+      return res.status(504).json({ erro: 'Timeout', mensagem: 'A consulta ao INPI excedeu o tempo limite' });
     }
 
-    // Erro genérico
-    return res.status(500).json({
-      erro: 'Erro interno',
-      mensagem: 'Ocorreu um erro ao processar sua solicitação'
-    });
+    // Config ou genérico
+    return res.status(500).json({ erro: 'Erro interno', mensagem: error.message || 'Falha inesperada' });
   }
 }
