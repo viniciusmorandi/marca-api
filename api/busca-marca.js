@@ -24,14 +24,15 @@ function normalize(texto) {
 function isPermissive(situacao) {
   const s = normalize(situacao);
   const allowlist = [
-    'indeferida', 'indeferido',
-    'negada', 'negado',
-    'arquivada', 'arquivamento',
-    'extinta', 'extinto',
-    'caducada', 'caducado',
-    'cancelada', 'cancelado',
-    'nulidade procedente', 'nulo',
-    'renuncia', 'renúncia'
+    'indeferid',          // indeferida/indeferido
+    'negad',              // negada/negado
+    'arquiv',             // arquivada/arquivado/arquivamento
+    'extint',             // extinta/extinto
+    'caducad',            // caducada/caducado
+    'cancelad',           // cancelada/cancelado
+    'nulidade procedent', // nulidade procedente
+    'nulo',               // nulo
+    'renunci'             // renúncia/renuncia
   ];
   return allowlist.some(term => s.includes(term));
 }
