@@ -1,4 +1,3 @@
-// /api/busca-marca.js
 import axios from 'axios';
 import Ajv from 'ajv';
 
