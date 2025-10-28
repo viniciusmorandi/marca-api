@@ -1,3 +1,4 @@
+// /api/busca-marca.js
 import axios from 'axios';
 import Ajv from 'ajv';
 
@@ -6,6 +7,25 @@ import Ajv from 'ajv';
  * ========================================================================== */
 const normalize = (s = '') =>
   s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+
+/** Stems de situações TERMINAIS (qualquer outra => INDISPONÍVEL) */
+const TERMINAIS_STEMS = [
+  'indeferid',              // indeferida/indeferido
+  'negad',                  // negada/negado
+  'arquiv',                 // arquivada/arquivado/arquivamento
+  'extint',                 // extinta/extinto/registro de marca extinto
+  'caducad',                // caducada/caducado
+  'cancelad',               // cancelada/cancelado
+  'nulidade procedent',     // nulidade procedente
+  'nulo',                   // nulo
+  'renunci'                 // renúncia/renuncia (total)
+];
+
+/** true se a situação é terminal (permite novo registro) */
+const situacaoPermite = (situacao = '') => {
+  const s = normalize(situacao);
+  return TERMINAIS_STEMS.some(stem => s.includes(stem));
+};
 
 /* ============================================================================
  * Schema de validação da resposta (Ajv)
@@ -21,6 +41,7 @@ const RESPONSE_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
+        required: ['numero', 'situacao', 'titular', 'classe'],
         properties: {
           numero: { type: 'string' },
           situacao: { type: 'string' },
@@ -40,86 +61,133 @@ const RESPONSE_SCHEMA = {
         paginas_coletadas: { type: 'number' }
       }
     }
-  }
+  },
+  additionalProperties: false
 };
 
-const ajv = new Ajv();
+const ajv = new Ajv({ allErrors: true });
 const validateResponse = ajv.compile(RESPONSE_SCHEMA);
-
-/** Stems de situações TERMINAIS (qualquer outra => INDISPONÍVEL) */
-const TERMINAIS_STEMS = [
-  'indeferid',              // indeferida/indeferido
-  'negad',                  // negada/negado
-  'arquiv',                 // arquivada/arquivado/arquivamento
-  'extint',                 // extinta/extinto/registro de marca extinto
-  'caducad',                // caducada/caducado
-  'cancelad',               // cancelada/cancelado
-  'nulidade procedent',     // nulidade procedente
-  'nulo',                   // nulo
-  'renunci'                 // renúncia/renuncia (total)
-];
 
 /* ============================================================================
  * Mock Data para testes (usado quando MOCK_INFOSIMPLES=true)
  * ========================================================================== */
 const MOCK_DATA = {
-  'natura': {
+  natura: {
     code: 200,
     data: [{
       processos: [
-        { 
-          numero: '900000001', 
-          marca: 'NATURA', 
-          situacao: 'Registro de marca em vigor', 
-          titular: 'Natura Cosméticos S.A.', 
-          classe: '03' 
+        {
+          numero: '900000001',
+          marca: 'NATURA',
+          situacao: 'Registro de marca em vigor',
+          titular: 'Natura Cosméticos S.A.',
+          classe: '03'
         },
-        { 
-          numero: '900000002', 
-          marca: 'NATURA', 
-          situacao: 'Alto Renome', 
-          titular: 'Natura Cosméticos S.A.', 
-          classe: '03' 
+        {
+          numero: '900000002',
+          marca: 'NATURA',
+          situacao: 'Alto Renome',
+          titular: 'Natura Cosméticos S.A.',
+          classe: '03'
         }
-      ]
-    }],
-    total_paginas: 1
+      ],
+      total_paginas: 1
+    }]
   },
   'coca-cola': {
     code: 200,
     data: [{
       processos: [
-        { 
-          numero: '900000003', 
-          marca: 'COCA-COLA', 
-          situacao: 'Alto Renome', 
-          titular: 'The Coca-Cola Company', 
-          classe: '32' 
+        {
+          numero: '900000003',
+          marca: 'COCA-COLA',
+          situacao: 'Alto Renome',
+          titular: 'The Coca-Cola Company',
+          classe: '32'
         }
-      ]
-    }],
-    total_paginas: 1
+      ],
+      total_paginas: 1
+    }]
   },
-  'xyzminhamarca2025': {
+  xyzminhamarca2025: {
     code: 200,
-    data: [{ processos: [] }],
-    total_paginas: 1
+    data: [{
+      processos: [],
+      total_paginas: 1
+    }]
   }
 };
 
-/** true se a situação é terminal (permite novo registro) */
-const situacaoPermite = (situacao = '') => {
-  const s = normalize(situacao);
-  return TERMINAIS_STEMS.some(stem => s.includes(stem));
-};
-
-/** Extrai todos os processos de um resultado Infosimples (data = array de blocos) */
+/* ============================================================================
+ * Utilidades de parsing/paginação
+ * ========================================================================== */
 const extrairProcessos = (resultado) => {
   if (!resultado || !Array.isArray(resultado.data)) return [];
   return resultado.data.flatMap(b => (Array.isArray(b.processos) ? b.processos : []));
 };
 
-/** Aplica a regra simplificada de disponibilidade */
+const extrairTotalPaginas = (resultado) => {
+  if (!resultado) return 1;
+  // preferir dentro do bloco
+  const fromBlock = Array.isArray(resultado.data) && resultado.data[0]?.total_paginas;
+  if (typeof fromBlock === 'number') return fromBlock || 1;
+  // fallback (alguns mocks/versões trazem no topo)
+  if (typeof resultado.total_paginas === 'number') return resultado.total_paginas || 1;
+  return 1;
+};
+
+/* ============================================================================
+ * Consulta ao INPI via Infosimples — POST + paginação (sempre tipo=exata)
+ * ========================================================================== */
+async function consultarINPI_TodasPaginas(marca) {
+  const token = process.env.INFOSIMPLES_TOKEN;
+  if (!token) {
+    const e = new Error('Token Infosimples não configurado');
+    e.code = 'CONFIG';
+    throw e;
+  }
+
+  const url = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
+
+  const coletarPagina = async (pagina = 1) => {
+    const { data } = await axios.post(
+      url,
+      { token, marca, tipo: 'exata', pagina },                // SEMPRE e SÓ EXATA
+      { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+    );
+    return data; // { code, code_message, data:[{ processos, total_paginas }], ... }
+  };
+
+  // Página 1
+  const first = await coletarPagina(1);
+  if (first?.code && first.code !== 200) {
+    const e = new Error(`Infosimples erro (${first.code}): ${first.code_message || 'indisponível'}`);
+    e.code = 'UPSTREAM';
+    e.upstream = first;
+    throw e;
+  }
+
+  let blocos = Array.isArray(first?.data) ? [...first.data] : [];
+  const totalPaginas = extrairTotalPaginas(first);
+
+  // Demais páginas
+  for (let p = 2; p <= totalPaginas; p++) {
+    const page = await coletarPagina(p);
+    if (page?.code && page.code !== 200) {
+      const e = new Error(`Infosimples erro pág ${p} (${page.code}): ${page.code_message || 'indisponível'}`);
+      e.code = 'UPSTREAM';
+      e.upstream = page;
+      throw e;
+    }
+    if (Array.isArray(page?.data)) blocos = blocos.concat(page.data);
+  }
+
+  return { data: blocos, code: 200 };
+}
+
+/* ============================================================================
+ * Regras de decisão
+ * ========================================================================== */
 function decidirDisponibilidade(marcaDigitada, processos) {
   // (1) Sem processos => disponível
   if (!Array.isArray(processos) || processos.length === 0) {
@@ -148,116 +216,84 @@ function decidirDisponibilidade(marcaDigitada, processos) {
     situacaoPermite(p.situacao || p.situacao_processual || p.status || '')
   );
 
+  const processosOut = exatos.map(p => ({
+    numero: (p.numero ?? p.processo ?? '').toString(),
+    situacao: p.situacao || p.situacao_processual || p.status || '',
+    titular: p.titular || '',
+    classe: p.classe || p.classe_nice || ''
+  }));
+
   if (todasTerminais) {
     return {
       disponivel: true,
       motivo: 'Todas as situações são terminais',
-      processos: exatos.map(p => ({
-        numero: p.numero || p.processo || '',
-        situacao: p.situacao || p.situacao_processual || p.status || '',
-        titular: p.titular || '',
-        classe: p.classe || p.classe_nice || ''
-      }))
+      processos: processosOut
     };
   }
 
   return {
     disponivel: false,
-    motivo: 'Marca com situação(ões) não-terminal(is)',
-    processos: exatos.map(p => ({
-      numero: p.numero || p.processo || '',
-      situacao: p.situacao || p.situacao_processual || p.status || '',
-      titular: p.titular || '',
-      classe: p.classe || p.classe_nice || ''
-    }))
+    motivo: 'Há situação(ões) não-terminais (registro ativo, Alto Renome, exame, publicação, etc.)',
+    processos: processosOut
   };
 }
 
 /* ============================================================================
- * Função principal: consulta o INPI via Infosimples (TODAS as páginas)
- * ========================================================================== */
-async function consultarINPI_TodasPaginas(marca) {
-  const token = process.env.INFOSIMPLES_TOKEN;
-  if (!token) throw new Error('Token Infosimples não configurado');
-
-  const url = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
-  const params = {
-    termo: marca,
-    tipo: 'exata',    // SEMPRE busca exata (Rule 1)
-    token
-  };
-
-  let paginaAtual = 1;
-  let totalPaginas = 1;
-  let todosProcessos = [];
-
-  do {
-    const response = await axios.get(url, {
-      params: { ...params, pagina: paginaAtual },
-      timeout: 15000    // 15 segundos (corrigido)
-    });
-
-    const { code, data } = response.data;
-
-    // Rule 3: HTTP errors
-    if (code !== 200) {
-      throw { customStatus: 502, message: `Infosimples retornou code ${code}` };
-    }
-
-    // Extrai processos desta página
-    const processosPagina = extrairProcessos(response.data);
-    todosProcessos = todosProcessos.concat(processosPagina);
-
-    // Verifica se há mais páginas (Rule 5)
-    totalPaginas = response.data.total_paginas || 1;
-    paginaAtual++;
-
-  } while (paginaAtual <= totalPaginas);
-
-  return {
-    processos: todosProcessos,
-    paginasColetadas: totalPaginas
-  };
-}
-
-/* ============================================================================
- * Handler da API (Next.js)
+ * Handler da API (Next.js / Vercel) — usa POST
  * ========================================================================== */
 export default async function handler(req, res) {
-  const startTime = Date.now();
+  const t0 = Date.now();
+
+  // CORS básicos (opcional)
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({ erro: 'Método não permitido', mensagem: 'Use POST para consultar marcas' });
+  }
+
+  const { marca } = req.body || {};
+  if (!marca || typeof marca !== 'string' || marca.trim() === '') {
+    return res.status(422).json({ erro: 'Validação falhou', mensagem: 'O campo "marca" é obrigatório e deve ser uma string não vazia' });
+  }
+  const marcaTrimmed = marca.trim();
 
   try {
-    const { marca } = req.query;
-
-    if (!marca || typeof marca !== 'string') {
-      return res.status(400).json({ erro: 'Parâmetro "marca" obrigatório' });
-    }
-
     let processos = [];
     let paginasColetadas = 1;
 
-    // Verifica se deve usar mock data
     if (process.env.MOCK_INFOSIMPLES === 'true') {
-      const mockKey = normalize(marca);
-      const mockResponse = MOCK_DATA[mockKey];
-
-      if (mockResponse) {
-        processos = extrairProcessos(mockResponse);
-        paginasColetadas = mockResponse.total_paginas;
+      const mockKey = normalize(marcaTrimmed);
+      const mock = MOCK_DATA[mockKey];
+      if (!mock) {
+        return res.status(200).json({
+          marca: marcaTrimmed,
+          disponivel: true,
+          motivo: 'Nenhum registro encontrado (mock)',
+          processos: [],
+          metadata: {
+            fonte: 'INPI',
+            tipo_busca: 'exata',
+            timestamp: new Date().toISOString(),
+            tempo_resposta_ms: Date.now() - t0,
+            paginas_coletadas: 1
+          }
+        });
       }
+      processos = extrairProcessos(mock);
+      paginasColetadas = extrairTotalPaginas(mock);
     } else {
-      // Consulta real
-      const resultado = await consultarINPI_TodasPaginas(marca);
-      processos = resultado.processos;
-      paginasColetadas = resultado.paginasColetadas;
+      const resultado = await consultarINPI_TodasPaginas(marcaTrimmed);
+      processos = extrairProcessos(resultado);
+      paginasColetadas = extrairTotalPaginas(resultado);
     }
 
-    // Decisão de disponibilidade (Rule 2)
-    const decisao = decidirDisponibilidade(marca, processos);
+    const decisao = decidirDisponibilidade(marcaTrimmed, processos);
 
-    // Monta resposta final (Rule 6)
     const resposta = {
-      marca,
+      marca: marcaTrimmed,
       disponivel: decisao.disponivel,
       motivo: decisao.motivo,
       processos: decisao.processos,
@@ -265,71 +301,83 @@ export default async function handler(req, res) {
         fonte: 'INPI',
         tipo_busca: 'exata',
         timestamp: new Date().toISOString(),
-        tempo_resposta_ms: Date.now() - startTime,
+        tempo_resposta_ms: Date.now() - t0,
         paginas_coletadas: paginasColetadas
       }
     };
 
-    // Validação com Ajv antes de enviar
     if (!validateResponse(resposta)) {
-      console.error('Erro de validação:', validateResponse.errors);
+      console.error('Ajv errors:', validateResponse.errors);
       return res.status(500).json({ erro: 'Formato de resposta inválido' });
     }
 
     return res.status(200).json(resposta);
 
   } catch (err) {
-    console.error('[ERRO]', err);
+    console.error('ERRO', {
+      msg: err.message,
+      code: err.code,
+      upstream: err.upstream?.code,
+      upstream_msg: err.upstream?.code_message
+    });
 
-    // Rule 3: Error handling
-    if (err.customStatus) {
-      return res.status(err.customStatus).json({ erro: err.message });
+    if (err.code === 'UPSTREAM' || err?.response) {
+      return res.status(502).json({
+        erro: 'Erro ao consultar INPI',
+        mensagem: err.upstream?.code_message || err.response?.data?.message || err.message
+      });
     }
     if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') {
       return res.status(504).json({ erro: 'Timeout na consulta ao INPI' });
     }
-
-    return res.status(500).json({ erro: 'Erro interno ao processar consulta' });
+    if (err.code === 'CONFIG') {
+      return res.status(500).json({ erro: 'Configuração', mensagem: err.message });
+    }
+    return res.status(500).json({ erro: 'Erro interno', mensagem: 'Falha inesperada' });
   }
 }
 
 /* ============================================================================
  * Testes automatizados (executar com MOCK_INFOSIMPLES=true)
+ * node -e "import('./api/busca-marca.js').then(m=>m.runTests())"
  * ========================================================================== */
 export async function runTests() {
-  console.log('\n========== INICIANDO TESTES AUTOMATIZADOS ==========\n');
-  
-  const originalMock = process.env.MOCK_INFOSIMPLES;
+  const original = process.env.MOCK_INFOSIMPLES;
   process.env.MOCK_INFOSIMPLES = 'true';
 
+  const makeRes = () => {
+    let statusCode = 200;
+    return {
+      status(code) {
+        statusCode = code;
+        return this;
+      },
+      json(payload) {
+        // Retorna um objeto que o runner consegue inspecionar
+        return { statusCode, body: payload };
+      },
+      setHeader() {} // no-op para CORS nos testes
+    };
+  };
+
   const tests = [
-    { marca: 'NATURA', expectedDisponivel: false },
-    { marca: 'COCA-COLA', expectedDisponivel: false },
-    { marca: 'XYZMINHAMARCA2025', expectedDisponivel: true }
+    { nome: 'NATURA', esperado: false },
+    { nome: 'COCA-COLA', esperado: false },
+    { nome: 'XYZMINHAMARCA2025', esperado: true }
   ];
 
-  for (const test of tests) {
-    try {
-      const mockReq = { query: { marca: test.marca } };
-      const mockRes = {
-        status: (code) => ({
-          json: (data) => ({ statusCode: code, body: data })
-        })
-      };
-
-      const result = await handler(mockReq, mockRes);
-      const disponivel = result.body.disponivel;
-      const passed = disponivel === test.expectedDisponivel;
-      
-      console.log(`[TEST] ${test.marca} → disponivel=${disponivel} ${passed ? '✅' : '❌'}`);
-      if (!passed) {
-        console.error(`  FALHOU: esperado=${test.expectedDisponivel}, recebido=${disponivel}`);
-      }
-    } catch (error) {
-      console.error(`[TEST] ${test.marca} → ERRO ❌`, error.message);
+  console.log('\n========== INICIANDO TESTES (MOCK) ==========');
+  for (const t of tests) {
+    const req = { method: 'POST', body: { marca: t.nome } };
+    const res = makeRes();
+    const result = await handler(req, res); // nosso handler retorna o objeto do res.json no mock
+    const ok = result?.body?.disponivel === t.esperado;
+    console.log(`[TEST] ${t.nome} → disponivel=${result?.body?.disponivel} ${ok ? '✅' : '❌'}`);
+    if (!ok) {
+      console.error('  Esperado:', t.esperado, ' Recebido:', result?.body?.disponivel, ' Status:', result?.statusCode);
     }
   }
+  console.log('========== TESTES CONCLUÍDOS ==========\n');
 
-  process.env.MOCK_INFOSIMPLES = originalMock;
-  console.log('\n========== TESTES CONCLUÍDOS ==========\n');
+  process.env.MOCK_INFOSIMPLES = original;
 }
