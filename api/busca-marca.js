@@ -8,7 +8,7 @@ import Ajv from 'ajv';
 const stripDiacriticsLower = (s = '') =>
   s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 
-// remove tudo que não for letra/dígito (une palavras): "túnel crew" -> "tunelcrew"
+// une palavras removendo tudo que não for letra/dígito: "túnel crew" -> "tunelcrew"
 const canonical = (s = '') => stripDiacriticsLower(s).replace(/[^a-z0-9]+/g, '');
 
 const equalsLoose = (a = '', b = '') => {
@@ -38,12 +38,12 @@ const situacaoPermite = (situacao = '') => {
   return TERMINAIS_STEMS.some(stem => s.includes(stem));
 };
 
-// Extrai o melhor campo de situação dentre possíveis chaves
+// Extrai o melhor campo de situação dentre possíveis chaves vindas do upstream
 const getSituacao = (proc = {}) =>
   proc.situacao ||
   proc.situacao_processual ||
   proc.status ||
-  proc.registro || // às vezes o Infosimples manda "Marca Registrada" / "Marca Arquivada" aqui
+  proc.registro || // às vezes vem "Marca Registrada" / "Marca Arquivada" aqui
   '';
 
 /* ============================================================================
@@ -90,47 +90,7 @@ const ajv = new Ajv({ allErrors: true });
 const validateResponse = ajv.compile(RESPONSE_SCHEMA);
 
 /* ============================================================================
- * MOCK para testes offline (MOCK_INFOSIMPLES=true)
- * ========================================================================== */
-const MOCK_DATA = {
-  natura: {
-    code: 200,
-    data: [{
-      processos: [
-        { numero: '900000001', marca: 'NATURA', situacao: 'Registro de marca em vigor', titular: 'Natura Cosméticos S.A.', classe: '03' },
-        { numero: '900000002', marca: 'NATURA', situacao: 'Alto Renome', titular: 'Natura Cosméticos S.A.', classe: '03' }
-      ],
-      total_paginas: 1
-    }]
-  },
-  'coca-cola': {
-    code: 200,
-    data: [{
-      processos: [
-        { numero: '900000003', marca: 'COCA-COLA', situacao: 'Alto Renome', titular: 'The Coca-Cola Company', classe: '32' }
-      ],
-      total_paginas: 1
-    }]
-  },
-  xyzminhamarca2025: {
-    code: 200,
-    data: [{ processos: [], total_paginas: 1 }]
-  },
-  // caso citado: Túnel Crew
-  'tunel crew': {
-    code: 200,
-    data: [{
-      processos: [
-        { numero: '915021196', marca: 'Túnel Crew', situacao: 'Registro de marca em vigor', titular: 'ANGELO ANTONIO MESQUITA BITTAR', classe: 'NCL(11) 25' },
-        { numero: '915022397', marca: 'Túnel Crew', situacao: 'Pedido definitivamente arquivado', titular: 'ANGELO ANTONIO MESQUITA BITTAR', classe: 'NCL(11) 41' }
-      ],
-      total_paginas: 1
-    }]
-  }
-};
-
-/* ============================================================================
- * Parsing e paginação
+ * Parsing e paginação (resposta Infosimples)
  * ========================================================================== */
 const extrairProcessos = (resultado) => {
   if (!resultado || !Array.isArray(resultado.data)) return [];
@@ -147,6 +107,7 @@ const extrairTotalPaginas = (resultado) => {
 
 /* ============================================================================
  * Infosimples — POST + paginação (sempre tipo='exata')
+ *   Sem marcas hardcoded. Modo MOCK opcional retorna lista vazia genérica.
  * ========================================================================== */
 async function consultarINPI_TodasPaginas(marca) {
   const token = process.env.INFOSIMPLES_TOKEN;
@@ -156,12 +117,9 @@ async function consultarINPI_TodasPaginas(marca) {
     throw e;
   }
 
-  // MOCK para testes locais
+  // MOCK opcional para testes de integração (sem marcas hardcoded)
   if (process.env.MOCK_INFOSIMPLES === 'true') {
-    const key = stripDiacriticsLower(marca);
-    const mock = MOCK_DATA[key] || MOCK_DATA[canonical(marca)] || null;
-    if (!mock) return { data: [{ processos: [], total_paginas: 1 }], code: 200 };
-    return mock;
+    return { code: 200, data: [{ processos: [], total_paginas: 1 }] };
   }
 
   const url = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
@@ -170,7 +128,7 @@ async function consultarINPI_TodasPaginas(marca) {
   const coletar = async (pagina = 1) => {
     const { data } = await axios.post(
       url,
-      { token, marca, tipo: 'exata', pagina },
+      { token, marca, tipo: 'exata', pagina }, // SEMPRE e SÓ EXATA
       { headers, timeout: 15000 }
     );
     return data; // { code, data:[{ processos, total_paginas }], ... }
@@ -205,12 +163,15 @@ async function consultarINPI_TodasPaginas(marca) {
 
 /* ============================================================================
  * Decisão de disponibilidade
+ *   Regra: somente DISPONÍVEL se TODOS os matches exatos (tolerantes)
+ *   estiverem em situação terminal. Qualquer outra ⇒ INDISPONÍVEL.
  * ========================================================================== */
 function decidirDisponibilidade(marcaDigitada, processos) {
   // 1) Sem processos ⇒ disponível
   if (!Array.isArray(processos) || processos.length === 0) {
     return { disponivel: true, motivo: 'Nenhum registro encontrado (busca exata)', processos: [] };
-    }
+  }
+
   // 2) Match "exato" tolerante (acentos/case/espaço/pontuação)
   const exatos = processos.filter(p => equalsLoose(p.marca || '', marcaDigitada));
 
@@ -251,7 +212,7 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // Aceita POST (padrão) e GET (fallback do Wix, se vier)
+  // Aceita POST (padrão) e GET (fallback, se o front chamar com query)
   const metodoValido = req.method === 'POST' || req.method === 'GET';
   if (!metodoValido) {
     return res.status(405).json({ erro: 'Método não permitido', mensagem: 'Use POST (ou GET com marca em query)' });
@@ -264,7 +225,7 @@ export default async function handler(req, res) {
   const marcaTrimmed = marca.trim();
 
   try {
-    // 1) Consultar Infosimples (com mock se habilitado)
+    // 1) Consultar Infosimples (com mock genérico se habilitado)
     const bruto = await consultarINPI_TodasPaginas(marcaTrimmed);
 
     // Upstream com erro (garantia extra)
@@ -326,8 +287,9 @@ export default async function handler(req, res) {
 }
 
 /* ============================================================================
- * Testes (rodar local com MOCK_INFOSIMPLES=true)
- * node -e "import('./api/busca-marca.js').then(m=>m.runTests())"
+ * Testes (opcional; rodar local com MOCK_INFOSIMPLES=true)
+ *   Sem marcas hardcoded. Apenas valida o fluxo e o schema.
+ *   node -e "import('./api/busca-marca.js').then(m=>m.runTests?.())"
  * ========================================================================== */
 export async function runTests() {
   const original = process.env.MOCK_INFOSIMPLES;
@@ -339,29 +301,20 @@ export async function runTests() {
       _result: null,
       setHeader() {},
       status(code) { statusCode = code; return this; },
-      json(payload) {
-        this._result = { statusCode, body: payload };
-        return this._result; // facilita assert
-      }
+      json(payload) { this._result = { statusCode, body: payload }; return this._result; }
     };
   };
 
-  const tests = [
-    { name: 'NATURA', expected: false },
-    { name: 'COCA-COLA', expected: false },
-    { name: 'XYZMINHAMARCA2025', expected: true },
-    { name: 'Túnel Crew', expected: false } // caso citado
-  ];
+  const samples = ['Marca Generica A', 'Teste_B', 'Outro Sinal 123'];
 
-  console.log('\n========== INICIANDO TESTES (MOCK) ==========');
-  for (const t of tests) {
-    const req = { method: 'POST', body: { marca: t.name } };
+  console.log('\n========== INICIANDO TESTES (MOCK genérico, sem marcas fixas) ==========');
+  for (const nome of samples) {
+    const req = { method: 'POST', body: { marca: nome } };
     const res = makeRes();
-    const out = await handler(req, res);
-    const result = res._result || out; // compat
-    const ok = result?.body?.disponivel === t.expected;
-    console.log(`[TEST] ${t.name} → disponivel=${result?.body?.disponivel} ${ok ? '✅' : '❌'}`);
-    if (!ok) console.error('  Esperado:', t.expected, ' Recebido:', result?.body?.disponivel, ' Status:', result?.statusCode);
+    const _ = await handler(req, res);
+    const result = res._result;
+    const ok = result?.statusCode === 200 && typeof result?.body?.disponivel === 'boolean';
+    console.log(`[TEST] "${nome}" → HTTP ${result?.statusCode}, disponivel=${result?.body?.disponivel} ${ok ? '✅' : '❌'}`);
   }
   console.log('========== TESTES CONCLUÍDOS ==========\n');
 
