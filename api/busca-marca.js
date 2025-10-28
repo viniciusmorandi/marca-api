@@ -48,6 +48,7 @@ function situacaoPermite(situacao) {
  * Timeout configurado no axios (10s)
  */
 async function consultarINPI(marca) {
+    console.log('DEBUG: consultarINPI called with marca:', marca);
   const url = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
   
   const requestBody = {
@@ -55,6 +56,7 @@ async function consultarINPI(marca) {
     marca: marca,
     tipo: 'exata'  // SEMPRE E SÓ EXATA - nunca usar radical
   };
+    console.log('DEBUG: requestBody =', { ...requestBody, token: '***MASKED***' });
 
   // Timeout no config do axios (3º parâmetro), NÃO no body
   const response = await axios.post(url, requestBody, {
@@ -62,6 +64,8 @@ async function consultarINPI(marca) {
   });
 
   return response.data;
+    console.log('DEBUG: Infosimples response status:', response.status, 'data length:', JSON.stringify(response.data).length);
+    console.log('DEBUG: response.data.processos:', response.data.processos?.length || 0, 'items');
 }
 
 // ==============================================================================
@@ -170,9 +174,11 @@ export default async function handler(req, res) {
   try {
     // Consulta ao INPI (envia exatamente como o usuário digitou)
     const resultado = await consultarINPI(marcaTrimmed);
+        console.log('DEBUG: Handler received marca:', marcaTrimmed);
 
     // Extrai processos retornados
     const processos = resultado?.data?.processos || [];
+        console.log('DEBUG: processos array from INPI:', processos.length, 'items');
 
     // Decide disponibilidade
     const decisao = decidirDisponibilidade(marcaTrimmed, processos);
