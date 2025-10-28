@@ -52,7 +52,7 @@ const getSituacao = (proc = {}) =>
   '';
 
 /* ============================================================================
- * Schema de resposta
+ * Schema de resposta (validação Ajv)
  * ========================================================================== */
 const RESPONSE_SCHEMA = {
   type: 'object',
@@ -92,7 +92,7 @@ const ajv = new Ajv({ allErrors: true });
 const validateResponse = ajv.compile(RESPONSE_SCHEMA);
 
 /* ============================================================================
- * Consulta Infosimples
+ * Consulta ao INPI via Infosimples
  * ========================================================================== */
 async function consultarINPI_TodasPaginas(marca) {
   const token = process.env.INFOSIMPLES_TOKEN;
@@ -111,7 +111,20 @@ async function consultarINPI_TodasPaginas(marca) {
   };
 
   const first = await coletar(1);
-  if (first?.code !== 200) throw new Error('Erro na resposta Infosimples');
+
+  // ⚠️ TRATAMENTO ESPECIAL: INPI fora do ar ou sem retorno
+  if (first?.code === 612 || first?.code === 615) {
+    const e = new Error('INPI fora do ar ou sem retorno de dados');
+    e.code = 'INPI_DOWN';
+    e.details = first?.code_message;
+    throw e;
+  }
+
+  if (first?.code !== 200) {
+    const e = new Error(`Erro Infosimples: ${first?.code_message || 'indefinido'}`);
+    e.code = 'UPSTREAM';
+    throw e;
+  }
 
   let blocos = Array.isArray(first.data) ? [...first.data] : [];
   const total = first.data?.[0]?.total_paginas ?? 1;
@@ -124,7 +137,7 @@ async function consultarINPI_TodasPaginas(marca) {
 }
 
 /* ============================================================================
- * Lógica de decisão: disponível x indisponível
+ * Lógica de decisão de disponibilidade
  * ========================================================================== */
 function decidirDisponibilidade(marcaDigitada, processos) {
   if (!Array.isArray(processos) || processos.length === 0) {
@@ -132,42 +145,34 @@ function decidirDisponibilidade(marcaDigitada, processos) {
   }
 
   const nomeCanonico = canonical(marcaDigitada);
-  const exatosOuParecidos = processos.filter(p => equalsLoose(p.marca || '', marcaDigitada));
+  const relevantes = processos.filter(p =>
+    equalsLoose(p.marca || '', marcaDigitada) ||
+    canonical(p.marca || '').includes(nomeCanonico)
+  );
 
-  // ⚠️ Se não encontrou “exatos”, tenta “quase iguais” (sem espaços)
-  const proximos = processos.filter(p => canonical(p.marca || '').includes(nomeCanonico));
-
-  const relevantes = [...new Set([...exatosOuParecidos, ...proximos])];
   if (relevantes.length === 0) {
     return { disponivel: true, motivo: 'Nenhum registro exato encontrado', processos: [] };
   }
 
-  const processosOut = relevantes.map(p => ({
-    numero: (p.numero ?? p.processo ?? '').toString(),
-    situacao: getSituacao(p),
-    titular: p.titular || '',
-    classe: (p.classe || p.classe_nice || '').toString()
-  }));
-
-  // ❗️Se qualquer um dos processos não for terminal, já bloqueia
+  // Se qualquer um dos processos não for terminal, já bloqueia
   const algumAtivo = relevantes.some(p => !situacaoPermite(getSituacao(p)));
   if (algumAtivo) {
     return {
       disponivel: false,
       motivo: 'Há registros em vigor ou em andamento que impedem novo pedido.',
-      processos: processosOut
+      processos: [] // ✅ Resumo removido conforme solicitado
     };
   }
 
   return {
     disponivel: true,
     motivo: 'Todas as situações são terminais (permite registro)',
-    processos: processosOut
+    processos: [] // ✅ Resumo removido conforme solicitado
   };
 }
 
 /* ============================================================================
- * Handler principal (Next.js)
+ * Handler principal (Next.js / Vercel)
  * ========================================================================== */
 export default async function handler(req, res) {
   const inicio = Date.now();
@@ -207,11 +212,38 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json(resposta);
+
   } catch (err) {
     console.error('Erro ao consultar:', err.message);
-    return res.status(502).json({
-      erro: 'Falha na consulta ao INPI',
-      mensagem: err.message
+
+    if (err.code === 'INPI_DOWN') {
+      return res.status(503).json({
+        marca,
+        disponivel: false,
+        motivo: '⚠️ O site do INPI está instável ou não retornou resultados. Tente novamente em alguns minutos.'
+      });
+    }
+
+    if (err.code === 'UPSTREAM') {
+      return res.status(502).json({
+        marca,
+        disponivel: false,
+        motivo: `Erro na comunicação com o Infosimples (${err.message})`
+      });
+    }
+
+    if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') {
+      return res.status(504).json({
+        marca,
+        disponivel: false,
+        motivo: '⏱️ Tempo de resposta do INPI excedido. Tente novamente.'
+      });
+    }
+
+    return res.status(500).json({
+      marca,
+      disponivel: false,
+      motivo: '❌ Erro interno ao processar consulta. Tente novamente.'
     });
   }
 }
