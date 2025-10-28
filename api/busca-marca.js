@@ -3,36 +3,56 @@ import axios from 'axios';
 import Ajv from 'ajv';
 
 /* ============================================================================
- * Helpers de normalização e decisão
+ * Normalização e utilidades de comparação
  * ========================================================================== */
-const normalize = (s = '') =>
+const stripDiacriticsLower = (s = '') =>
   s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 
-/** Stems de situações TERMINAIS (qualquer outra => INDISPONÍVEL) */
-const TERMINAIS_STEMS = [
-  'indeferid',              // indeferida/indeferido
-  'negad',                  // negada/negado
-  'arquiv',                 // arquivada/arquivado/arquivamento
-  'extint',                 // extinta/extinto/registro de marca extinto
-  'caducad',                // caducada/caducado
-  'cancelad',               // cancelada/cancelado
-  'nulidade procedent',     // nulidade procedente
-  'nulo',                   // nulo
-  'renunci'                 // renúncia/renuncia (total)
-];
+// remove tudo que não for letra/dígito (une palavras): "túnel crew" -> "tunelcrew"
+const canonical = (s = '') => stripDiacriticsLower(s).replace(/[^a-z0-9]+/g, '');
 
-/** true se a situação é terminal (permite novo registro) */
-const situacaoPermite = (situacao = '') => {
-  const s = normalize(situacao);
-  return TERMINAIS_STEMS.some(stem => s.includes(stem));
+const equalsLoose = (a = '', b = '') => {
+  const A = canonical(a);
+  const B = canonical(b);
+  return A === B || A.includes(B) || B.includes(A);
 };
 
 /* ============================================================================
- * Schema de validação da resposta (Ajv)
+ * Situações TERMINAIS (qualquer outra => INDISPONÍVEL)
+ * ========================================================================== */
+const TERMINAIS_STEMS = [
+  'indeferid',           // indeferida/indeferido
+  'negad',               // negada/negado
+  'arquiv',              // arquivada/arquivado/arquivamento/pedido definitivamente arquivado
+  'extint',              // extinta/extinto/registro de marca extinto
+  'caducad',             // caducada/caducado
+  'cancelad',            // cancelada/cancelado
+  'nulidade procedent',  // nulidade procedente
+  'nulo',                // nulo
+  'renunci'              // renúncia/renuncia (total)
+];
+
+// Retorna true se a situação é terminal (permite registro)
+const situacaoPermite = (situacao = '') => {
+  const s = stripDiacriticsLower(situacao);
+  return TERMINAIS_STEMS.some(stem => s.includes(stem));
+};
+
+// Extrai o melhor campo de situação dentre possíveis chaves
+const getSituacao = (proc = {}) =>
+  proc.situacao ||
+  proc.situacao_processual ||
+  proc.status ||
+  proc.registro || // às vezes o Infosimples manda "Marca Registrada" / "Marca Arquivada" aqui
+  '';
+
+/* ============================================================================
+ * Schema da resposta (Ajv)
  * ========================================================================== */
 const RESPONSE_SCHEMA = {
   type: 'object',
   required: ['marca', 'disponivel', 'motivo', 'processos', 'metadata'],
+  additionalProperties: false,
   properties: {
     marca: { type: 'string' },
     disponivel: { type: 'boolean' },
@@ -42,6 +62,7 @@ const RESPONSE_SCHEMA = {
       items: {
         type: 'object',
         required: ['numero', 'situacao', 'titular', 'classe'],
+        additionalProperties: false,
         properties: {
           numero: { type: 'string' },
           situacao: { type: 'string' },
@@ -53,6 +74,7 @@ const RESPONSE_SCHEMA = {
     metadata: {
       type: 'object',
       required: ['fonte', 'tipo_busca', 'timestamp', 'tempo_resposta_ms', 'paginas_coletadas'],
+      additionalProperties: false,
       properties: {
         fonte: { type: 'string' },
         tipo_busca: { type: 'string' },
@@ -61,35 +83,22 @@ const RESPONSE_SCHEMA = {
         paginas_coletadas: { type: 'number' }
       }
     }
-  },
-  additionalProperties: false
+  }
 };
 
 const ajv = new Ajv({ allErrors: true });
 const validateResponse = ajv.compile(RESPONSE_SCHEMA);
 
 /* ============================================================================
- * Mock Data para testes (usado quando MOCK_INFOSIMPLES=true)
+ * MOCK para testes offline (MOCK_INFOSIMPLES=true)
  * ========================================================================== */
 const MOCK_DATA = {
   natura: {
     code: 200,
     data: [{
       processos: [
-        {
-          numero: '900000001',
-          marca: 'NATURA',
-          situacao: 'Registro de marca em vigor',
-          titular: 'Natura Cosméticos S.A.',
-          classe: '03'
-        },
-        {
-          numero: '900000002',
-          marca: 'NATURA',
-          situacao: 'Alto Renome',
-          titular: 'Natura Cosméticos S.A.',
-          classe: '03'
-        }
+        { numero: '900000001', marca: 'NATURA', situacao: 'Registro de marca em vigor', titular: 'Natura Cosméticos S.A.', classe: '03' },
+        { numero: '900000002', marca: 'NATURA', situacao: 'Alto Renome', titular: 'Natura Cosméticos S.A.', classe: '03' }
       ],
       total_paginas: 1
     }]
@@ -98,28 +107,30 @@ const MOCK_DATA = {
     code: 200,
     data: [{
       processos: [
-        {
-          numero: '900000003',
-          marca: 'COCA-COLA',
-          situacao: 'Alto Renome',
-          titular: 'The Coca-Cola Company',
-          classe: '32'
-        }
+        { numero: '900000003', marca: 'COCA-COLA', situacao: 'Alto Renome', titular: 'The Coca-Cola Company', classe: '32' }
       ],
       total_paginas: 1
     }]
   },
   xyzminhamarca2025: {
     code: 200,
+    data: [{ processos: [], total_paginas: 1 }]
+  },
+  // caso citado: Túnel Crew
+  'tunel crew': {
+    code: 200,
     data: [{
-      processos: [],
+      processos: [
+        { numero: '915021196', marca: 'Túnel Crew', situacao: 'Registro de marca em vigor', titular: 'ANGELO ANTONIO MESQUITA BITTAR', classe: 'NCL(11) 25' },
+        { numero: '915022397', marca: 'Túnel Crew', situacao: 'Pedido definitivamente arquivado', titular: 'ANGELO ANTONIO MESQUITA BITTAR', classe: 'NCL(11) 41' }
+      ],
       total_paginas: 1
     }]
   }
 };
 
 /* ============================================================================
- * Utilidades de parsing/paginação
+ * Parsing e paginação
  * ========================================================================== */
 const extrairProcessos = (resultado) => {
   if (!resultado || !Array.isArray(resultado.data)) return [];
@@ -128,16 +139,14 @@ const extrairProcessos = (resultado) => {
 
 const extrairTotalPaginas = (resultado) => {
   if (!resultado) return 1;
-  // preferir dentro do bloco
-  const fromBlock = Array.isArray(resultado.data) && resultado.data[0]?.total_paginas;
-  if (typeof fromBlock === 'number') return fromBlock || 1;
-  // fallback (alguns mocks/versões trazem no topo)
-  if (typeof resultado.total_paginas === 'number') return resultado.total_paginas || 1;
+  const fromBlock = Array.isArray(resultado.data) ? resultado.data[0]?.total_paginas : undefined;
+  if (typeof fromBlock === 'number' && fromBlock >= 1) return fromBlock;
+  if (typeof resultado.total_paginas === 'number' && resultado.total_paginas >= 1) return resultado.total_paginas;
   return 1;
 };
 
 /* ============================================================================
- * Consulta ao INPI via Infosimples — POST + paginação (sempre tipo=exata)
+ * Infosimples — POST + paginação (sempre tipo='exata')
  * ========================================================================== */
 async function consultarINPI_TodasPaginas(marca) {
   const token = process.env.INFOSIMPLES_TOKEN;
@@ -147,19 +156,28 @@ async function consultarINPI_TodasPaginas(marca) {
     throw e;
   }
 
-  const url = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
+  // MOCK para testes locais
+  if (process.env.MOCK_INFOSIMPLES === 'true') {
+    const key = stripDiacriticsLower(marca);
+    const mock = MOCK_DATA[key] || MOCK_DATA[canonical(marca)] || null;
+    if (!mock) return { data: [{ processos: [], total_paginas: 1 }], code: 200 };
+    return mock;
+  }
 
-  const coletarPagina = async (pagina = 1) => {
+  const url = 'https://api.infosimples.com/api/v2/consultas/inpi/marcas';
+  const headers = { 'Content-Type': 'application/json' };
+
+  const coletar = async (pagina = 1) => {
     const { data } = await axios.post(
       url,
-      { token, marca, tipo: 'exata', pagina },                // SEMPRE e SÓ EXATA
-      { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+      { token, marca, tipo: 'exata', pagina },
+      { headers, timeout: 15000 }
     );
-    return data; // { code, code_message, data:[{ processos, total_paginas }], ... }
+    return data; // { code, data:[{ processos, total_paginas }], ... }
   };
 
   // Página 1
-  const first = await coletarPagina(1);
+  const first = await coletar(1);
   if (first?.code && first.code !== 200) {
     const e = new Error(`Infosimples erro (${first.code}): ${first.code_message || 'indisponível'}`);
     e.code = 'UPSTREAM';
@@ -172,7 +190,7 @@ async function consultarINPI_TodasPaginas(marca) {
 
   // Demais páginas
   for (let p = 2; p <= totalPaginas; p++) {
-    const page = await coletarPagina(p);
+    const page = await coletar(p);
     if (page?.code && page.code !== 200) {
       const e = new Error(`Infosimples erro pág ${p} (${page.code}): ${page.code_message || 'indisponível'}`);
       e.code = 'UPSTREAM';
@@ -186,112 +204,82 @@ async function consultarINPI_TodasPaginas(marca) {
 }
 
 /* ============================================================================
- * Regras de decisão
+ * Decisão de disponibilidade
  * ========================================================================== */
 function decidirDisponibilidade(marcaDigitada, processos) {
-  // (1) Sem processos => disponível
+  // 1) Sem processos ⇒ disponível
   if (!Array.isArray(processos) || processos.length === 0) {
-    return {
-      disponivel: true,
-      motivo: 'Nenhum registro encontrado (busca exata)',
-      processos: []
-    };
-  }
+    return { disponivel: true, motivo: 'Nenhum registro encontrado (busca exata)', processos: [] };
+    }
+  // 2) Match "exato" tolerante (acentos/case/espaço/pontuação)
+  const exatos = processos.filter(p => equalsLoose(p.marca || '', marcaDigitada));
 
-  // (2) Considera apenas matches EXATOS do nome (comparação normalizada)
-  const alvo = normalize(marcaDigitada);
-  const exatos = processos.filter(p => normalize(p.marca || '') === alvo);
-
-  // Sem match exato => disponível
   if (exatos.length === 0) {
-    return {
-      disponivel: true,
-      motivo: 'Nenhum registro exato encontrado',
-      processos: []
-    };
+    return { disponivel: true, motivo: 'Nenhum registro exato encontrado', processos: [] };
   }
 
-  // (3) Só permite se TODAS as situações forem terminais
-  const todasTerminais = exatos.every(p =>
-    situacaoPermite(p.situacao || p.situacao_processual || p.status || '')
-  );
+  // 3) Se TODAS as situações forem terminais ⇒ disponível; senão ⇒ indisponível
+  const todasTerminais = exatos.every(p => situacaoPermite(getSituacao(p)));
 
   const processosOut = exatos.map(p => ({
     numero: (p.numero ?? p.processo ?? '').toString(),
-    situacao: p.situacao || p.situacao_processual || p.status || '',
+    situacao: getSituacao(p),
     titular: p.titular || '',
-    classe: p.classe || p.classe_nice || ''
+    classe: (p.classe || p.classe_nice || '').toString()
   }));
 
   if (todasTerminais) {
-    return {
-      disponivel: true,
-      motivo: 'Todas as situações são terminais',
-      processos: processosOut
-    };
+    return { disponivel: true, motivo: 'Todas as situações são terminais (permite registro)', processos: processosOut };
   }
 
   return {
     disponivel: false,
-    motivo: 'Há situação(ões) não-terminais (registro ativo, Alto Renome, exame, publicação, etc.)',
+    motivo: 'Há situação(ões) não-terminais (registro em vigor, Alto Renome, exame, publicação, etc.)',
     processos: processosOut
   };
 }
 
 /* ============================================================================
- * Handler da API (Next.js / Vercel) — usa POST
+ * Handler (Next.js / Vercel) — POST (aceita GET por segurança)
  * ========================================================================== */
 export default async function handler(req, res) {
   const t0 = Date.now();
 
-  // CORS básicos (opcional)
+  // CORS básicos
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ erro: 'Método não permitido', mensagem: 'Use POST para consultar marcas' });
+  // Aceita POST (padrão) e GET (fallback do Wix, se vier)
+  const metodoValido = req.method === 'POST' || req.method === 'GET';
+  if (!metodoValido) {
+    return res.status(405).json({ erro: 'Método não permitido', mensagem: 'Use POST (ou GET com marca em query)' });
   }
 
-  const { marca } = req.body || {};
+  const marca = (req.method === 'POST' ? req.body?.marca : req.query?.marca) ?? '';
   if (!marca || typeof marca !== 'string' || marca.trim() === '') {
     return res.status(422).json({ erro: 'Validação falhou', mensagem: 'O campo "marca" é obrigatório e deve ser uma string não vazia' });
   }
   const marcaTrimmed = marca.trim();
 
   try {
-    let processos = [];
-    let paginasColetadas = 1;
+    // 1) Consultar Infosimples (com mock se habilitado)
+    const bruto = await consultarINPI_TodasPaginas(marcaTrimmed);
 
-    if (process.env.MOCK_INFOSIMPLES === 'true') {
-      const mockKey = normalize(marcaTrimmed);
-      const mock = MOCK_DATA[mockKey];
-      if (!mock) {
-        return res.status(200).json({
-          marca: marcaTrimmed,
-          disponivel: true,
-          motivo: 'Nenhum registro encontrado (mock)',
-          processos: [],
-          metadata: {
-            fonte: 'INPI',
-            tipo_busca: 'exata',
-            timestamp: new Date().toISOString(),
-            tempo_resposta_ms: Date.now() - t0,
-            paginas_coletadas: 1
-          }
-        });
-      }
-      processos = extrairProcessos(mock);
-      paginasColetadas = extrairTotalPaginas(mock);
-    } else {
-      const resultado = await consultarINPI_TodasPaginas(marcaTrimmed);
-      processos = extrairProcessos(resultado);
-      paginasColetadas = extrairTotalPaginas(resultado);
+    // Upstream com erro (garantia extra)
+    if (bruto?.code && bruto.code !== 200) {
+      return res.status(502).json({
+        erro: 'Erro ao consultar INPI',
+        mensagem: bruto.code_message || 'Serviço indisponível'
+      });
     }
 
+    // 2) Extrair e decidir
+    const processos = extrairProcessos(bruto);
     const decisao = decidirDisponibilidade(marcaTrimmed, processos);
 
+    // 3) Montar resposta final
     const resposta = {
       marca: marcaTrimmed,
       disponivel: decisao.disponivel,
@@ -302,17 +290,17 @@ export default async function handler(req, res) {
         tipo_busca: 'exata',
         timestamp: new Date().toISOString(),
         tempo_resposta_ms: Date.now() - t0,
-        paginas_coletadas: paginasColetadas
+        paginas_coletadas: extrairTotalPaginas(bruto)
       }
     };
 
+    // 4) Validar schema antes de enviar
     if (!validateResponse(resposta)) {
       console.error('Ajv errors:', validateResponse.errors);
       return res.status(500).json({ erro: 'Formato de resposta inválido' });
     }
 
     return res.status(200).json(resposta);
-
   } catch (err) {
     console.error('ERRO', {
       msg: err.message,
@@ -338,7 +326,7 @@ export default async function handler(req, res) {
 }
 
 /* ============================================================================
- * Testes automatizados (executar com MOCK_INFOSIMPLES=true)
+ * Testes (rodar local com MOCK_INFOSIMPLES=true)
  * node -e "import('./api/busca-marca.js').then(m=>m.runTests())"
  * ========================================================================== */
 export async function runTests() {
@@ -348,34 +336,32 @@ export async function runTests() {
   const makeRes = () => {
     let statusCode = 200;
     return {
-      status(code) {
-        statusCode = code;
-        return this;
-      },
+      _result: null,
+      setHeader() {},
+      status(code) { statusCode = code; return this; },
       json(payload) {
-        // Retorna um objeto que o runner consegue inspecionar
-        return { statusCode, body: payload };
-      },
-      setHeader() {} // no-op para CORS nos testes
+        this._result = { statusCode, body: payload };
+        return this._result; // facilita assert
+      }
     };
   };
 
   const tests = [
-    { nome: 'NATURA', esperado: false },
-    { nome: 'COCA-COLA', esperado: false },
-    { nome: 'XYZMINHAMARCA2025', esperado: true }
+    { name: 'NATURA', expected: false },
+    { name: 'COCA-COLA', expected: false },
+    { name: 'XYZMINHAMARCA2025', expected: true },
+    { name: 'Túnel Crew', expected: false } // caso citado
   ];
 
   console.log('\n========== INICIANDO TESTES (MOCK) ==========');
   for (const t of tests) {
-    const req = { method: 'POST', body: { marca: t.nome } };
+    const req = { method: 'POST', body: { marca: t.name } };
     const res = makeRes();
-    const result = await handler(req, res); // nosso handler retorna o objeto do res.json no mock
-    const ok = result?.body?.disponivel === t.esperado;
-    console.log(`[TEST] ${t.nome} → disponivel=${result?.body?.disponivel} ${ok ? '✅' : '❌'}`);
-    if (!ok) {
-      console.error('  Esperado:', t.esperado, ' Recebido:', result?.body?.disponivel, ' Status:', result?.statusCode);
-    }
+    const out = await handler(req, res);
+    const result = res._result || out; // compat
+    const ok = result?.body?.disponivel === t.expected;
+    console.log(`[TEST] ${t.name} → disponivel=${result?.body?.disponivel} ${ok ? '✅' : '❌'}`);
+    if (!ok) console.error('  Esperado:', t.expected, ' Recebido:', result?.body?.disponivel, ' Status:', result?.statusCode);
   }
   console.log('========== TESTES CONCLUÍDOS ==========\n');
 
