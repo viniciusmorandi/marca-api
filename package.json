@@ -2,7 +2,7 @@
   "name": "marca-api",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": { "node": "20.x" },
   "scripts": {
     "postinstall": "npx playwright install --with-deps chromium",
     "build": "echo \"Serverless API (no build step)\"",
