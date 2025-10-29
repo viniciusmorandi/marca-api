@@ -1,4 +1,13 @@
 {
+  "functions": {
+    "api/*": {
+      "runtime": "nodejs20.x",
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  },
+  "installCommand": "npm ci",
+  "buildCommand": "npm run vercel-build",
   "headers": [
     {
       "source": "/api/(.*)",
