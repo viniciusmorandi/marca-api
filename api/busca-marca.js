@@ -1,74 +1,65 @@
+// /api/busca-marca.js (versão sem Playwright — definitivo)
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import Ajv from 'ajv';
-import { wrapper } from 'axios-cookiejar-support';
-import { CookieJar } from 'tough-cookie';
-import iconv from 'iconv-lite';
 
-// =========================
-// Feature flag Playwright
-// =========================
-const PLAYWRIGHT_ENABLED = process.env.PLAYWRIGHT_ENABLED === 'true';
-
-let _playwright = null;
-async function getPlaywright() {
-  if (_playwright) return _playwright;
-  const { chromium } = await import('playwright-core');
-  _playwright = { chromium };
-  return _playwright;
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+];
+const pickUA = (i = 0) => USER_AGENTS[i % USER_AGENTS.length];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function backoffWait(attempt, baseMs = 350) {
+  const exp = Math.min(6, attempt);
+  const delay = baseMs * Math.pow(2, exp - 1);
+  const jitter = Math.floor(Math.random() * (delay * 0.25));
+  await sleep(delay + jitter);
 }
 
-// ============
-// Utilitários
-// ============
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const CACHE = new Map();
-function getTTLms() { return 15 * 60 * 1000; } // 15min
+function getTTLms() {
+  const min = 10 * 60 * 1000, max = 30 * 60 * 1000;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 function cacheGet(key) {
   const hit = CACHE.get(key);
   if (!hit) return null;
   if (Date.now() > hit.expiresAt) { CACHE.delete(key); return null; }
   return hit.value;
 }
-function cacheSet(key, value) {
-  CACHE.set(key, { value, expiresAt: Date.now() + getTTLms() });
-}
+function cacheSet(key, value) { CACHE.set(key, { value, expiresAt: Date.now() + getTTLms() }); }
 
-function stripDiacriticsLower(s = '') { return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim(); }
-function canonical(s = '') { return stripDiacriticsLower(s).replace(/[^a-z0-9]+/g, ''); }
-const TERMINAIS_STEMS = ['indeferid', 'negad', 'arquiv', 'extint', 'caducad', 'cancelad', 'nulidade procedent', 'nulo', 'renunci'];
-function situacaoPermite(situacao = '') { return TERMINAIS_STEMS.some(stem => stripDiacriticsLower(situacao).includes(stem)); }
-function equalsLoose(a = '', b = '') {
-  const A = canonical(a);
-  const B = canonical(b);
+const stripDiacriticsLower = (s = '') => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+const canonical = (s = '') => stripDiacriticsLower(s).replace(/[^a-z0-9]+/g, '');
+const equalsLoose = (a = '', b = '') => {
+  const A = canonical(a); const B = canonical(b);
   return A === B || A.includes(B) || B.includes(A);
-}
+};
+const TERMINAIS_STEMS = ['indeferid','negad','arquiv','extint','caducad','cancelad','nulidade procedent','nulo','renunci'];
+const situacaoPermite = (situacao = '') => TERMINAIS_STEMS.some(stem => stripDiacriticsLower(situacao).includes(stem));
 
-// ==============
-// Schema de saída
-// ==============
 const RESPONSE_SCHEMA = {
   type: 'object',
   required: ['marca','disponivel','motivo','metadata'],
   additionalProperties: false,
   properties: {
-    marca: { type: 'string' },
-    disponivel: { type: 'boolean' },
-    motivo: { type: 'string' },
-    processos: { type: 'array', items: { type: 'object', additionalProperties: true }, nullable: true },
-    metadata: {
-      type: 'object',
-      required: ['fonte','tipo_busca','timestamp','tempo_resposta_ms','paginas_coletadas','metodo'],
-      additionalProperties: false,
-      properties: {
-        fonte: { type: 'string' },
-        tipo_busca: { type: 'string' },
-        timestamp: { type: 'string' },
-        tempo_resposta_ms: { type: 'number' },
-        paginas_coletadas: { type: 'number' },
-        metodo: { type: 'string' }
+    marca:{type:'string'},
+    disponivel:{type:'boolean'},
+    motivo:{type:'string'},
+    metadata:{
+      type:'object',
+      required:['fonte','tipo_busca','timestamp','tempo_resposta_ms','paginas_coletadas','metodo'],
+      additionalProperties:false,
+      properties:{
+        fonte:{type:'string'},
+        tipo_busca:{type:'string'},
+        timestamp:{type:'string'},
+        tempo_resposta_ms:{type:'number'},
+        paginas_coletadas:{type:'number'},
+        metodo:{type:'string'}
       }
     }
   }
@@ -76,123 +67,94 @@ const RESPONSE_SCHEMA = {
 const ajv = new Ajv({ allErrors: true });
 const validateResponse = ajv.compile(RESPONSE_SCHEMA);
 
-// ================================
-// Parser de tabela HTML do INPI
-// ================================
+// ---------- Cheerio ----------
+const INPI_BASE = 'https://busca.inpi.gov.br/pePI';
+const CANDIDATE_ENDPOINTS = [
+  (marca) => `${INPI_BASE}/servlet/MarcasServletController?Action=searchMarca&tipoPesquisa=BY_MARCA_CLASSIF_BASICA&Marca=${encodeURIComponent(marca)}`,
+  (marca) => `${INPI_BASE}/servlet/MarcasServletController?Action=searchMarca&tipoPesquisa=BY_MARCA_CLASSIF_BASICA&marca=${encodeURIComponent(marca)}`,
+  (marca) => `${INPI_BASE}/servlet/MarcasServletController?Action=searchMarca&tipoPesquisa=BY_MARCA_CLASSIF_BASICA&expressao=${encodeURIComponent(marca)}`,
+  (marca) => `${INPI_BASE}/jsp/marcas/Pesquisa_classe_basica.jsp?Marca=${encodeURIComponent(marca)}`
+];
+
 function parseTabelaHTML(html) {
   const $ = cheerio.load(html);
   const linhas = [];
-  $('table').each((_, tbl) => {
-    const headerText = $(tbl).text().toLowerCase();
-    const looksLikeResults =
-      headerText.includes('resultado da pesquisa') ||
-      (headerText.includes('número') && headerText.includes('situação') && headerText.includes('classe'));
-    if (!looksLikeResults) return;
-    $(tbl).find('tr').each((i, tr) => {
-      const tds = $(tr).find('td');
-      if (tds.length < 5) return;
-      const numero   = $(tds[0]).text().trim();
-      const prioridade = $(tds[1]).text().trim();
-      const tipo     = $(tds[2]).text().trim();
-      const marca    = $(tds[3]).text().trim();
-      const registro = $(tds[4]).text().trim();
-      const situacao = $(tds[5] || tds[4]).text().trim();
-      const titular  = $(tds[6] || tds[5]).text().trim();
-      const classe   = $(tds[7] || tds[6]).text().trim();
-      if (numero || marca || situacao) {
-        linhas.push({ numero, prioridade, tipo, marca, registro, situacao, titular, classe });
-      }
-    });
+  const tabelas = $('table');
+  tabelas.each((_, tbl) => {
+    const headTxt = $(tbl).text().toLowerCase();
+    if (headTxt.includes('número') && headTxt.includes('marca') && headTxt.includes('situação') && headTxt.includes('classe')) {
+      $(tbl).find('tr').each((i, tr) => {
+        const tds = $(tr).find('td');
+        if (tds.length >= 7) {
+          const numero  = $(tds[0]).text().trim();
+          const marca   = $(tds[3]).text().trim();
+          const situacao= $(tds[5]).text().trim();
+          const titular = $(tds[6]).text().trim();
+          const classe  = $(tds[7] || tds[6]).text().trim();
+          if (numero || marca || situacao) linhas.push({ numero, marca, situacao, titular, classe });
+        }
+      });
+    }
   });
   return linhas;
 }
 
-// ==============================
-// Scraper: HTTP + Cheerio com sessão/cookie
-// ==============================
-const INPI_BASE = 'https://busca.inpi.gov.br/pePI';
-
-function makeClient() {
-  const jar = new CookieJar();
-  const client = wrapper(axios.create({
-    jar,
-    withCredentials: true,
-    responseType: 'arraybuffer',
-    timeout: 15000,
-    headers: {
-      'User-Agent': USER_AGENT,
-      'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-      'Cache-Control': 'no-cache'
-    },
-    validateStatus: () => true,
-  }));
-  return client;
-}
-function decodeBody(buffer, contentType = '') {
-  const ct = (contentType || '').toLowerCase();
-  const isLatin1 = ct.includes('iso-8859-1') || ct.includes('latin1');
-  return isLatin1 ? iconv.decode(buffer, 'latin1') : iconv.decode(buffer, 'utf8');
-}
-async function httpGetHtml(client, url, referer) {
-  const res = await client.get(url, {
-    headers: referer ? { Referer: referer } : undefined,
-  });
-  const html = decodeBody(res.data, res.headers['content-type'] || '');
-  return { status: res.status, html, headers: res.headers };
-}
-async function tentarCheerio(marca) {
-  try {
-    const client = makeClient();
-    // Preflight: abre sessão e recebe cookie JSESSIONID
-    const preflightUrl = `${INPI_BASE}/jsp/marcas/Pesquisa_classe_basica.jsp`;
-    await httpGetHtml(client, preflightUrl);
-
-    const endpoints = [
-      (m) => `${INPI_BASE}/servlet/MarcasServletController?Action=searchMarca&tipoPesquisa=BY_MARCA_CLASSIF_BASICA&Marca=${encodeURIComponent(m)}`,
-      (m) => `${INPI_BASE}/servlet/MarcasServletController?Action=searchMarca&tipoPesquisa=BY_MARCA_CLASSIF_BASICA&marca=${encodeURIComponent(m)}`,
-      (m) => `${INPI_BASE}/servlet/MarcasServletController?Action=searchMarca&tipoPesquisa=BY_MARCA_CLASSIF_BASICA&expressao=${encodeURIComponent(m)}`
-    ];
-
-    for (const build of endpoints) {
-      const url = build(marca);
-      const { status, html } = await httpGetHtml(client, url, preflightUrl);
-      // Log básico para debug de erro/resultado:
-      console.warn('INPI html sample', { status, snippet: html.slice(0, 200) });
-      if (status >= 200 && status < 400 && typeof html === 'string') {
-        const $ = cheerio.load(html);
-        const pageText = $('body').text().toLowerCase();
-        const looksLikeResult = pageText.includes('resultado da pesquisa') || $('table').length > 0;
-        if (looksLikeResult) {
-          const processos = parseTabelaHTML(html);
-          return {
-            processos,
-            paginasColetadas: 1,
-            metodo: 'cheerio',
-            paginasTotal: 1,
-            urlUsada: url
-          };
-        }
+async function httpGetWithRetry(urlBuilder, termoMarca, maxAttempts = 3) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const url = urlBuilder(termoMarca);
+    const ua = pickUA(attempt - 1);
+    try {
+      const { data: html, status, headers } = await axios.get(url, {
+        timeout: 15000,
+        headers: {
+          'User-Agent': ua,
+          'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+          'Cache-Control': 'no-cache'
+        },
+        validateStatus: () => true
+      });
+      if (status >= 200 && status < 300 && typeof html === 'string') {
+        return html;
       }
-      // Pequeno backoff se erro HTTP
-      if ([429, 500, 502, 503, 504].includes(status)) {
-        await new Promise(r => setTimeout(r, 600 + Math.random() * 400));
+      if ([429,500,502,503,504].includes(status)) {
+        lastError = new Error(`HTTP ${status}`);
+        await backoffWait(attempt);
         continue;
       }
+      throw new Error(`Status não esperado: ${status} / ct=${headers?.['content-type']}`);
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts) await backoffWait(attempt);
     }
-    return null; // Força fallback (Playwright)
-  } catch (err) {
-    console.error('Falha técnica Cheerio:', err);
-    return null;
   }
+  throw lastError || new Error('Falha HTTP após tentativas');
 }
 
-// ====================================
-// Decisão de disponibilidade
-// ====================================
-function decidirDisponibilidade(marcaDigitada, processos) {
-  if (!Array.isArray(processos) || processos.length === 0) {
-    return { disponivel: true, motivo: 'Nenhum registro encontrado (busca exata)' };
+async function tentarCheerio(marca) {
+  for (const build of CANDIDATE_ENDPOINTS) {
+    try {
+      const html = await httpGetWithRetry(build, marca, 3);
+      if (typeof html === 'string' && html.toLowerCase().includes('resultado da pesquisa')) {
+        const processos = parseTabelaHTML(html);
+        const $ = cheerio.load(html);
+        let paginas = 1;
+        const rodape = $('body').text();
+        const m = rodape.match(/P[áa]ginas de Resultados:\s*([\s\S]*?)$/i);
+        if (m) {
+          const qtd = (m[1].match(/\d+/g) || []).map(Number);
+          const max = Math.max(1, ...qtd);
+          if (Number.isFinite(max)) paginas = max;
+        }
+        return { processos, paginasColetadas: 1, metodo: 'cheerio', urlUsada: build(marca), paginasTotal: paginas };
+      }
+    } catch {}
   }
+  return null;
+}
+
+function decidirDisponibilidade(marcaDigitada, processos) {
+  if (!Array.isArray(processos) || processos.length === 0) return { disponivel: true, motivo: 'Nenhum registro encontrado (busca exata)' };
   const exatos = processos.filter(p => equalsLoose(p.marca || '', marcaDigitada));
   if (exatos.length === 0) return { disponivel: true, motivo: 'Nenhum registro exato encontrado' };
   const todasTerminais = exatos.every(p => situacaoPermite(p.situacao || ''));
@@ -200,9 +162,6 @@ function decidirDisponibilidade(marcaDigitada, processos) {
   return { disponivel: false, motivo: 'Há situação(ões) não-terminais (ex.: registro em vigor, Alto Renome, exame, publicação, etc.)' };
 }
 
-// ==============
-// Handler (API) - CORS liberado para Wix/n8n
-// ==============
 export default async function handler(req, res) {
   const t0 = Date.now();
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -218,6 +177,8 @@ export default async function handler(req, res) {
     return res.status(422).json({ erro: 'Validação falhou', mensagem: 'O campo "marca" é obrigatório e deve ser uma string não vazia' });
   }
   const marcaTrimmed = marca.trim();
+
+  // Micro-cache
   const cacheKey = `marca:${canonical(marcaTrimmed)}`;
   const cached = cacheGet(cacheKey);
   if (cached) {
@@ -225,19 +186,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1) Tenta Cheerio (robusto/sessão/latin1)
     let resultado = await tentarCheerio(marcaTrimmed);
 
-    // 2) Fallback Playwright (opcional - seu código, se quiser ativar para casos bloqueados)
-    // if (!resultado || !Array.isArray(resultado.processos)) {
-    //   try {
-    //     resultado = await tentarPlaywright(marcaTrimmed);
-    //   } catch {
-    //     // Fallback seguro caso Playwright não disponível
-    //     resultado = { processos: [], paginasColetadas: 0, metodo: 'desativado', paginasTotal: 0 };
-    //   }
-    // }
-
+    // NUNCA TENTA PLAYWRIGHT AQUI — se não deu certo no Cheerio, retorna 502 controlado:
     if (!resultado || !Array.isArray(resultado.processos)) {
       return res.status(502).json({ erro: 'Falha ao consultar INPI', mensagem: 'Não foi possível extrair resultados da pesquisa' });
     }
@@ -249,7 +200,6 @@ export default async function handler(req, res) {
       marca: marcaTrimmed,
       disponivel: decisao.disponivel,
       motivo: decisao.motivo,
-      processos,
       metadata: {
         fonte: 'INPI (site oficial)',
         tipo_busca: 'exata',
@@ -269,9 +219,7 @@ export default async function handler(req, res) {
     return res.status(200).json(resposta);
   } catch (err) {
     console.error('ERRO scraper INPI', { msg: err.message, stack: err.stack });
-    if (err.name === 'TimeoutError') {
-      return res.status(504).json({ erro: 'Timeout na consulta ao INPI' });
-    }
+    if (err.name === 'TimeoutError') return res.status(504).json({ erro: 'Timeout na consulta ao INPI' });
     return res.status(500).json({ erro: 'Erro interno', mensagem: 'Falha inesperada ao consultar INPI' });
   }
 }
